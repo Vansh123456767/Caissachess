@@ -1,0 +1,6 @@
+{
+  "name": "Caissa Chess — Open Chess Arena, Variants & Analysis",
+  "description": "Ad-free open chess platform with 8 variants, engine analysis, puzzles, tournaments, studies, opening explorer, tablebase, and lessons.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
