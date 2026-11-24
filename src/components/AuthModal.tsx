@@ -1,7 +1,9 @@
-import React, { useEffect, useState } from 'react';
-import { AuthUser } from '../types/chess';
+import React, { useEffect, useRef, useState } from 'react';
+import { AuthUser, PlanTier } from '../types/chess';
+import { PLAN_CATALOG } from '../data/plans';
 import {
   Check,
+  Crown,
   Eye,
   EyeOff,
   KeyRound,
@@ -21,6 +23,8 @@ interface AuthModalProps {
   authToken?: string | null;
   onAuthSuccess: (token: string, user: AuthUser) => void;
   onLogout: () => Promise<void> | void;
+  planTier?: PlanTier;
+  onOpenPlans?: () => void;
 }
 
 function generateSuggestedPassword(): string {
@@ -52,6 +56,29 @@ function getPasswordStrength(pw: string): {
   return { label: 'Strong', color: 'text-emerald-600 dark:text-emerald-400', bars: 4 };
 }
 
+function normalizeUsername(raw: string): string {
+  return raw
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function validateUsername(raw: string): string | null {
+  const clean = normalizeUsername(raw);
+  if (clean.length < 3) {
+    return `Username must be at least 3 characters (${clean.length}/3 entered).`;
+  }
+  if (clean.length > 48) {
+    return `Username must be 48 characters or fewer (${clean.length}/48).`;
+  }
+  const badMatch = clean.match(/[^\p{L}\p{N}_. @+-]/u);
+  if (badMatch) {
+    return `Unsupported character "${badMatch[0]}". Use letters, numbers, spaces, _, ., -, @, or +.`;
+  }
+  return null;
+}
+
 export const AuthModal: React.FC<AuthModalProps> = ({
   open,
   initialMode = 'login',
@@ -59,6 +86,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   authUser,
   onAuthSuccess,
   onLogout,
+  planTier = 'free',
+  onOpenPlans,
 }) => {
   const [mode, setMode] = useState<'login' | 'register'>(initialMode);
   const [username, setUsername] = useState('');
@@ -68,6 +97,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [showConfirm, setShowConfirm] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const usernameRef = useRef<HTMLInputElement>(null);
+  const passwordRef = useRef<HTMLInputElement>(null);
+  const confirmRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (open) {
@@ -89,6 +122,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const passwordValidLen = password.length >= 6;
   const passwordsMatch =
     confirmPassword.length > 0 && password === confirmPassword;
+  const cleanUsername = normalizeUsername(username);
+  const usernameIssue = cleanUsername.length > 0 ? validateUsername(username) : null;
 
   const handleSuggestPassword = () => {
     const suggested = generateSuggestedPassword();
@@ -103,20 +138,28 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     e.preventDefault();
     setError(null);
 
-    const trimmedUser = username.trim();
-    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(trimmedUser)) {
-      setError('Username must be 3–32 characters using letters, numbers, _, ., or -.');
+    const rawUserInput = usernameRef.current?.value ?? username;
+    const rawPassInput = passwordRef.current?.value ?? password;
+    const rawConfirmInput = confirmRef.current?.value ?? confirmPassword;
+
+    const trimmedUser = normalizeUsername(rawUserInput);
+    if (rawUserInput !== username) {
+      setUsername(rawUserInput);
+    }
+    const userErr = validateUsername(rawUserInput);
+    if (userErr) {
+      setError(userErr);
       return;
     }
-    if (mode === 'register' && password.length < 6) {
+    if (mode === 'register' && rawPassInput.length < 6) {
       setError('Password must be at least 6 characters.');
       return;
     }
-    if (mode === 'login' && password.length === 0) {
+    if (mode === 'login' && rawPassInput.length === 0) {
       setError('Please enter your password.');
       return;
     }
-    if (mode === 'register' && password !== confirmPassword) {
+    if (mode === 'register' && rawPassInput !== rawConfirmInput) {
       setError('Passwords do not match.');
       return;
     }
@@ -127,7 +170,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
       const resp = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: trimmedUser, password }),
+        body: JSON.stringify({ username: trimmedUser, password: rawPassInput }),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok || !data?.token || !data?.user) {
@@ -193,6 +236,27 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </span>
             </div>
 
+            {onOpenPlans && (
+              <div className="flex items-center justify-between gap-2 p-3 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 text-xs">
+                <div className="flex items-center gap-2">
+                  <Crown className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                  <span className="text-stone-700 dark:text-zinc-300">
+                    Active Plan: <strong>{PLAN_CATALOG[planTier].name}</strong> ({PLAN_CATALOG[planTier].priceLabel})
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenPlans();
+                  }}
+                  className="text-emerald-600 dark:text-emerald-400 font-semibold hover:underline shrink-0"
+                >
+                  Change Plan
+                </button>
+              </div>
+            )}
+
             <div className="flex items-center justify-end gap-2 pt-2">
               <button
                 type="button"
@@ -250,19 +314,35 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   Username
                 </label>
                 <input
+                  ref={usernameRef}
                   type="text"
+                  name="username"
                   autoComplete="username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={username}
                   onChange={(e) => {
                     setUsername(e.target.value);
                     if (error) setError(null);
                   }}
-                  placeholder="e.g. Grandmaster_K"
+                  placeholder="e.g. Grandmaster_K or your email"
                   className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-sm text-stone-900 dark:text-zinc-100"
                 />
-                <p className="text-[11px] text-stone-500 dark:text-zinc-400 mt-1">
-                  3–32 characters: letters, numbers, _, ., or -.
-                </p>
+                {usernameIssue ? (
+                  <p className="text-[11px] text-red-600 dark:text-red-400 mt-1">
+                    {usernameIssue}
+                  </p>
+                ) : cleanUsername.length >= 3 ? (
+                  <p className="text-[11px] text-emerald-600 dark:text-emerald-400 mt-1 flex items-center gap-1">
+                    <Check className="w-3 h-3 shrink-0" />
+                    <span>Username ready ({cleanUsername.length} chars)</span>
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-stone-500 dark:text-zinc-400 mt-1">
+                    3–48 characters (letters, numbers, spaces, _, ., -, or @).
+                  </p>
+                )}
               </div>
 
               <div>
@@ -283,7 +363,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 </div>
                 <div className="relative">
                   <input
+                    ref={passwordRef}
                     type={showPassword ? 'text' : 'password'}
+                    name="password"
                     autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
                     value={password}
                     onChange={(e) => {
@@ -347,7 +429,9 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                   </label>
                   <div className="relative">
                     <input
+                      ref={confirmRef}
                       type={showConfirm ? 'text' : 'password'}
+                      name="confirmPassword"
                       autoComplete="new-password"
                       value={confirmPassword}
                       onChange={(e) => {

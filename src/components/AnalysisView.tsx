@@ -3,14 +3,17 @@ import {
   AnalyzedMove,
   BoardState,
   ChessVariant,
+  DailyQuotaUsage,
   GameRecord,
   Move,
   Piece,
   PieceColor,
   PieceType,
+  PlanTier,
   Puzzle,
   UserPreferences,
 } from '../types/chess';
+import { getPlanLimits, normalizeQuotaUsage, PLAN_CATALOG } from '../data/plans';
 import {
   createInitialState,
   exportPgn,
@@ -69,6 +72,10 @@ interface AnalysisViewProps {
   onSaveExtractedPuzzles: (puzzles: Puzzle[]) => void;
   onPlayFromPosition: (fen: string, variant: ChessVariant) => void;
   onImportGameRecord: (record: GameRecord) => void;
+  planTier: PlanTier;
+  dailyUsage: DailyQuotaUsage;
+  onConsumeAnalysisQuota: () => Promise<{ allowed: boolean; error?: string }>;
+  onOpenPlans: () => void;
 }
 
 type AnalysisSubTab = 'board' | 'editor' | 'explorer' | 'tablebase';
@@ -80,6 +87,10 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
   onSaveExtractedPuzzles,
   onPlayFromPosition,
   onImportGameRecord,
+  planTier,
+  dailyUsage,
+  onConsumeAnalysisQuota,
+  onOpenPlans,
 }) => {
   const [subTab, setSubTab] = useState<AnalysisSubTab>('board');
   const [variant, setVariant] = useState<ChessVariant>(incomingPayload?.variant || 'standard');
@@ -107,6 +118,10 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
   const [mistakeDrillActive, setMistakeDrillActive] = useState(false);
   const [mistakeIndex, setMistakeIndex] = useState(0);
   const [mistakeFeedback, setMistakeFeedback] = useState<string | null>(null);
+  const [analysisQuotaError, setAnalysisQuotaError] = useState<string | null>(null);
+
+  const normUsage = useMemo(() => normalizeQuotaUsage(dailyUsage), [dailyUsage]);
+  const planLimits = useMemo(() => getPlanLimits(planTier), [planTier]);
 
   // Opening Explorer state
   const [explorerScope, setExplorerScope] = useState<'global' | 'personal' | 'rival'>('global');
@@ -186,8 +201,16 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
     if (mv) handleBoardMove(mv);
   };
 
-  const runFullGameAnalysis = () => {
+  const runFullGameAnalysis = async () => {
     if (moves.length === 0) return;
+    setAnalysisQuotaError(null);
+    const gate = await onConsumeAnalysisQuota();
+    if (!gate.allowed) {
+      setAnalysisQuotaError(
+        gate.error || 'Daily analysis limit reached. Upgrade to Pro or Max to continue.'
+      );
+      return;
+    }
     const res = analyzeGameMoves(fens, moves, variant);
     setReviewData({ analyzed: res.analyzed, accuracy: res.accuracy, acpl: res.acpl });
     if (res.extractedPuzzles.length > 0) {
@@ -202,9 +225,9 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
     );
   }, [reviewData]);
 
-  const startMistakeDrill = () => {
+  const startMistakeDrill = async () => {
     if (!reviewData) {
-      runFullGameAnalysis();
+      await runFullGameAnalysis();
     }
     setMistakeDrillActive(true);
     setMistakeIndex(0);
@@ -792,9 +815,22 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
                 {/* Full Game Analysis & Learn From Mistakes */}
                 <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-4 space-y-3">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <h3 className="text-sm font-semibold text-stone-900 dark:text-zinc-100">
-                      Deep Game Review & Mistakes Trainer
-                    </h3>
+                    <div>
+                      <h3 className="text-sm font-semibold text-stone-900 dark:text-zinc-100">
+                        Deep Game Review & Mistakes Trainer
+                      </h3>
+                      <div className="text-[11px] text-stone-500 dark:text-zinc-400 font-mono tabular-nums mt-0.5">
+                        {PLAN_CATALOG[planTier].name} Plan · {normUsage.analysisUsed} /{' '}
+                        {planLimits.analysisPerDay === null ? '∞' : planLimits.analysisPerDay} analyses today ·{' '}
+                        <button
+                          type="button"
+                          onClick={onOpenPlans}
+                          className="text-emerald-600 dark:text-emerald-400 font-sans font-semibold hover:underline"
+                        >
+                          {planTier === 'max' ? 'Manage Plan' : 'Upgrade'}
+                        </button>
+                      </div>
+                    </div>
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
@@ -816,6 +852,19 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
                       )}
                     </div>
                   </div>
+
+                  {analysisQuotaError && (
+                    <div className="p-3 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 flex flex-wrap items-center justify-between gap-2 text-xs text-amber-800 dark:text-amber-200">
+                      <span>{analysisQuotaError}</span>
+                      <button
+                        type="button"
+                        onClick={onOpenPlans}
+                        className="px-3 py-1 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-semibold whitespace-nowrap shrink-0"
+                      >
+                        View Free / Pro / Max
+                      </button>
+                    </div>
+                  )}
 
                   {/* Mistake Drill Interactive Banner */}
                   {mistakeDrillActive && mistakesList[mistakeIndex] && (

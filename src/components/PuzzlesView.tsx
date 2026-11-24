@@ -1,5 +1,18 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { GameResult, Move, Puzzle, UserPreferences } from '../types/chess';
+import {
+  DailyQuotaUsage,
+  GameResult,
+  Move,
+  PlanTier,
+  Puzzle,
+  UserPreferences,
+} from '../types/chess';
+import {
+  canConsumeQuota,
+  getPlanLimits,
+  normalizeQuotaUsage,
+  PLAN_CATALOG,
+} from '../data/plans';
 import {
   CHESS_LESSONS,
   CURATED_PUZZLES,
@@ -43,6 +56,7 @@ import {
   CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  Clock,
   Crown,
   Flame,
   GraduationCap,
@@ -59,13 +73,124 @@ import {
 interface PuzzlesViewProps {
   prefs: UserPreferences;
   userGamePuzzles: Puzzle[];
+  planTier: PlanTier;
+  dailyUsage: DailyQuotaUsage;
+  onConsumePuzzleQuota: () => Promise<{ allowed: boolean; error?: string }>;
+  onOpenPlans: () => void;
 }
 
-type PuzzleSubTab = 'daily' | 'tactics' | 'streak' | 'storm' | 'racer' | 'endgame' | 'lessons';
+type PuzzleSubTab =
+  | 'daily'
+  | 'tactics'
+  | 'blitz'
+  | 'streak'
+  | 'storm'
+  | 'racer'
+  | 'endgame'
+  | 'lessons';
 
-export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles }) => {
+interface BlitzPreset {
+  id: string;
+  label: string;
+  targetCount: number;
+  totalSeconds: number;
+}
+
+const BLITZ_PRESETS: BlitzPreset[] = [
+  { id: 'sprint-5', label: '5 Puzzles · 60s', targetCount: 5, totalSeconds: 60 },
+  { id: 'series-10', label: '10 Puzzles · 120s', targetCount: 10, totalSeconds: 120 },
+  { id: 'marathon-15', label: '15 Puzzles · 180s', targetCount: 15, totalSeconds: 180 },
+];
+
+function formatDurationMs(ms: number): string {
+  const safe = Math.max(0, ms);
+  const totalSec = safe / 1000;
+  if (totalSec < 60) {
+    return `${totalSec.toFixed(1)}s`;
+  }
+  const mins = Math.floor(totalSec / 60);
+  const rem = (totalSec % 60).toFixed(1).padStart(4, '0');
+  return `${mins}:${rem}`;
+}
+
+function DifficultyBadge({ rating }: { rating: number }) {
+  const tier = getPuzzleDifficulty(rating);
+  const config =
+    tier === 'easy'
+      ? {
+          label: 'Easy',
+          bars: 1,
+          classes:
+            'bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 border-emerald-200 dark:border-emerald-800',
+          barActive: 'bg-emerald-600 dark:bg-emerald-400',
+        }
+      : tier === 'medium'
+      ? {
+          label: 'Medium',
+          bars: 2,
+          classes:
+            'bg-amber-50 dark:bg-amber-950/50 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800',
+          barActive: 'bg-amber-600 dark:bg-amber-400',
+        }
+      : {
+          label: 'Hard',
+          bars: 3,
+          classes:
+            'bg-rose-50 dark:bg-rose-950/50 text-rose-700 dark:text-rose-300 border-rose-200 dark:border-rose-800',
+          barActive: 'bg-rose-600 dark:bg-rose-400',
+        };
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md border text-[11px] font-semibold whitespace-nowrap shrink-0 ${config.classes}`}
+      title={`Difficulty: ${config.label} (Rating ${rating})`}
+    >
+      <span className="inline-flex items-end gap-0.5 h-2.5" aria-hidden="true">
+        <span
+          className={`w-0.5 h-1 rounded-xs ${
+            config.bars >= 1 ? config.barActive : 'bg-current opacity-25'
+          }`}
+        />
+        <span
+          className={`w-0.5 h-1.5 rounded-xs ${
+            config.bars >= 2 ? config.barActive : 'bg-current opacity-25'
+          }`}
+        />
+        <span
+          className={`w-0.5 h-2.5 rounded-xs ${
+            config.bars >= 3 ? config.barActive : 'bg-current opacity-25'
+          }`}
+        />
+      </span>
+      <span>{config.label}</span>
+    </span>
+  );
+}
+
+export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
+  prefs,
+  userGamePuzzles,
+  planTier,
+  dailyUsage,
+  onConsumePuzzleQuota,
+  onOpenPlans,
+}) => {
   const [subTab, setSubTab] = useState<PuzzleSubTab>('daily');
   const [sourceFilter, setSourceFilter] = useState<'all' | 'user'>('all');
+  const [puzzleQuotaError, setPuzzleQuotaError] = useState<string | null>(null);
+  const puzzleRoundCountedRef = useRef<boolean>(false);
+
+  const normUsage = useMemo(() => normalizeQuotaUsage(dailyUsage), [dailyUsage]);
+  const planLimits = useMemo(() => getPlanLimits(planTier), [planTier]);
+  const hasPuzzleQuotaRemaining = canConsumeQuota(planTier, normUsage, 'puzzle');
+  const [solvedPuzzleIds, setSolvedPuzzleIds] = useState<string[]>(() => {
+    try {
+      const raw = localStorage.getItem('caissa_solved_puzzle_ids_v1');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
 
   // Daily Puzzle state
   const todayKey = useMemo(() => formatLocalDateKey(new Date()), []);
@@ -282,6 +407,44 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
   const [racerScore, setRacerScore] = useState(0);
   const [botScores, setBotScores] = useState<[number, number, number]>([0, 0, 0]);
 
+  // Optional Competitive Solve Timer (tracks how fast a user solves a puzzle)
+  const [competitiveTimerEnabled, setCompetitiveTimerEnabled] = useState<boolean>(true);
+  const [solveElapsedMs, setSolveElapsedMs] = useState<number>(0);
+  const [lastSolveMs, setLastSolveMs] = useState<number | null>(null);
+  const [solveHistoryMs, setSolveHistoryMs] = useState<number[]>([]);
+  const [bestSolveMs, setBestSolveMs] = useState<number | null>(() => {
+    try {
+      const raw = localStorage.getItem('caissa_best_puzzle_solve_ms_v1');
+      if (!raw) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    } catch {
+      return null;
+    }
+  });
+  const puzzleStartAtRef = useRef<number>(Date.now());
+
+  // Blitz Mode (solve a series of puzzles under a total time constraint)
+  const [blitzPresetIdx, setBlitzPresetIdx] = useState<number>(0);
+  const [blitzStatus, setBlitzStatus] = useState<'idle' | 'active' | 'cleared' | 'timeout'>('idle');
+  const [blitzRemainingMs, setBlitzRemainingMs] = useState<number>(BLITZ_PRESETS[0].totalSeconds * 1000);
+  const [blitzSolvedCount, setBlitzSolvedCount] = useState<number>(0);
+  const [blitzWrongCount, setBlitzWrongCount] = useState<number>(0);
+  const [blitzSplitsMs, setBlitzSplitsMs] = useState<number[]>([]);
+  const [blitzElapsedTotalMs, setBlitzElapsedTotalMs] = useState<number>(0);
+  const [blitzBestTimes, setBlitzBestTimes] = useState<Record<string, number>>(() => {
+    try {
+      const raw = localStorage.getItem('caissa_blitz_best_v1');
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  });
+  const blitzDeadlineRef = useRef<number>(0);
+  const blitzStartedAtRef = useRef<number>(0);
+
+  const currentBlitzPreset = BLITZ_PRESETS[blitzPresetIdx] || BLITZ_PRESETS[0];
+
   const activePuzzle: Puzzle = useMemo(() => {
     if (subTab === 'daily') {
       return dailySelection.puzzle;
@@ -295,6 +458,10 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
 
   // Reset board when puzzle or tab changes
   const loadPuzzleAt = (idx: number, pool?: Puzzle[]) => {
+    puzzleRoundCountedRef.current = false;
+    puzzleStartAtRef.current = Date.now();
+    setSolveElapsedMs(0);
+
     if (subTab === 'daily') {
       setStepIdx(0);
       setBoardFen(dailySelection.puzzle.fen);
@@ -317,8 +484,45 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
 
   useEffect(() => {
     loadPuzzleAt(0);
+    setLastSolveMs(null);
+    if (subTab !== 'blitz') {
+      setBlitzStatus('idle');
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [subTab, sourceFilter, selectedDailyDate, fetchedCuratedPuzzles]);
+
+  // Competitive Solve Stopwatch (ticks while puzzle is active and unsolved)
+  useEffect(() => {
+    const isPuzzleWorkspace =
+      subTab === 'daily' ||
+      subTab === 'tactics' ||
+      subTab === 'streak' ||
+      (subTab === 'blitz' && blitzStatus === 'active');
+    if (!competitiveTimerEnabled || !isPuzzleWorkspace) return;
+    if (feedback === 'solved' || streakEnded) return;
+
+    const id = window.setInterval(() => {
+      setSolveElapsedMs(Date.now() - puzzleStartAtRef.current);
+    }, 100);
+    return () => window.clearInterval(id);
+  }, [competitiveTimerEnabled, subTab, blitzStatus, feedback, streakEnded]);
+
+  // Blitz Mode Total Countdown Clock
+  useEffect(() => {
+    if (subTab !== 'blitz' || blitzStatus !== 'active') return;
+    const id = window.setInterval(() => {
+      const rem = blitzDeadlineRef.current - Date.now();
+      if (rem <= 0) {
+        setBlitzRemainingMs(0);
+        setBlitzElapsedTotalMs(currentBlitzPreset.totalSeconds * 1000);
+        setBlitzStatus('timeout');
+        soundFX.defeat();
+      } else {
+        setBlitzRemainingMs(rem);
+      }
+    }, 100);
+    return () => window.clearInterval(id);
+  }, [subTab, blitzStatus, currentBlitzPreset.totalSeconds]);
 
   // Storm Timer
   useEffect(() => {
@@ -357,12 +561,52 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
     return () => window.clearInterval(id);
   }, [subTab, racerActive]);
 
+  const startBlitzSeries = (presetIndex: number = blitzPresetIdx) => {
+    if (!canConsumeQuota(planTier, normUsage, 'puzzle')) {
+      setPuzzleQuotaError(
+        `Daily puzzle limit reached (${planLimits.puzzlesPerDay}/day on ${PLAN_CATALOG[planTier].name}). Upgrade to Pro or Max to continue.`
+      );
+      return;
+    }
+    setPuzzleQuotaError(null);
+    const preset = BLITZ_PRESETS[presetIndex] || BLITZ_PRESETS[0];
+    setBlitzPresetIdx(presetIndex);
+    setBlitzSolvedCount(0);
+    setBlitzWrongCount(0);
+    setBlitzSplitsMs([]);
+    setBlitzElapsedTotalMs(0);
+    const now = Date.now();
+    blitzStartedAtRef.current = now;
+    blitzDeadlineRef.current = now + preset.totalSeconds * 1000;
+    setBlitzRemainingMs(preset.totalSeconds * 1000);
+    setBlitzStatus('active');
+    const startIdx = Math.floor(Math.random() * (allPuzzles.length || 1));
+    loadPuzzleAt(startIdx);
+  };
+
   const puzzleState = useMemo(() => parseFen(boardFen, 'standard'), [boardFen]);
 
   const handlePuzzleMove = (mv: Move) => {
     if (feedback === 'solved' || streakEnded) return;
     if (subTab === 'storm' && !stormActive) return;
     if (subTab === 'racer' && !racerActive) return;
+    if (subTab === 'blitz' && blitzStatus !== 'active') return;
+
+    if (!puzzleRoundCountedRef.current) {
+      if (!canConsumeQuota(planTier, normUsage, 'puzzle')) {
+        setPuzzleQuotaError(
+          `Daily puzzle limit reached (${planLimits.puzzlesPerDay}/day on ${PLAN_CATALOG[planTier].name}). Upgrade to Pro or Max to keep training today.`
+        );
+        return;
+      }
+      setPuzzleQuotaError(null);
+      puzzleRoundCountedRef.current = true;
+      void onConsumePuzzleQuota().then((res) => {
+        if (!res.allowed) {
+          setPuzzleQuotaError(res.error || 'Daily puzzle limit reached.');
+        }
+      });
+    }
 
     const playedUci = moveToUci(mv).toLowerCase();
     const expectedUci = activePuzzle.solutionUci[stepIdx]?.toLowerCase();
@@ -374,6 +618,10 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
 
       if (subTab === 'streak') {
         setStreakEnded(true);
+      } else if (subTab === 'blitz') {
+        setBlitzWrongCount((w) => w + 1);
+        blitzDeadlineRef.current = Math.max(Date.now(), blitzDeadlineRef.current - 3000);
+        setBlitzRemainingMs(Math.max(0, blitzDeadlineRef.current - Date.now()));
       } else if (subTab === 'storm') {
         setStormCombo(0);
         setStormTime((t) => Math.max(0, t - 5));
@@ -391,11 +639,36 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
 
     if (nextStep >= activePuzzle.solutionUci.length) {
       // Puzzle completely solved!
+      const solvedInMs = Math.max(100, Date.now() - puzzleStartAtRef.current);
+      setSolveElapsedMs(solvedInMs);
+      if (competitiveTimerEnabled) {
+        setLastSolveMs(solvedInMs);
+        setSolveHistoryMs((prev) => [...prev.slice(-19), solvedInMs]);
+        if (bestSolveMs === null || solvedInMs < bestSolveMs) {
+          setBestSolveMs(solvedInMs);
+          try {
+            localStorage.setItem('caissa_best_puzzle_solve_ms_v1', String(solvedInMs));
+          } catch {
+            // ignore
+          }
+        }
+      }
+
       soundFX.victory();
       setBoardFen(nextFen);
       setStepIdx(nextStep);
       setFeedback('solved');
       recordLeaderboardSolve();
+
+      if (!solvedPuzzleIds.includes(activePuzzle.id)) {
+        const nextSolvedIds = [...solvedPuzzleIds, activePuzzle.id];
+        setSolvedPuzzleIds(nextSolvedIds);
+        try {
+          localStorage.setItem('caissa_solved_puzzle_ids_v1', JSON.stringify(nextSolvedIds));
+        } catch {
+          // ignore
+        }
+      }
 
       if (subTab === 'daily') {
         setDailyHintStep(false);
@@ -411,6 +684,27 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
         }
       } else if (subTab === 'tactics') {
         setPuzzleRating((r) => r + 14);
+      } else if (subTab === 'blitz') {
+        const nextSolvedCount = blitzSolvedCount + 1;
+        setBlitzSolvedCount(nextSolvedCount);
+        setBlitzSplitsMs((prev) => [...prev, solvedInMs]);
+        if (nextSolvedCount >= currentBlitzPreset.targetCount) {
+          const totalUsed = Date.now() - blitzStartedAtRef.current;
+          setBlitzElapsedTotalMs(totalUsed);
+          setBlitzStatus('cleared');
+          const prevBest = blitzBestTimes[currentBlitzPreset.id];
+          if (!prevBest || totalUsed < prevBest) {
+            const nextBests = { ...blitzBestTimes, [currentBlitzPreset.id]: totalUsed };
+            setBlitzBestTimes(nextBests);
+            try {
+              localStorage.setItem('caissa_blitz_best_v1', JSON.stringify(nextBests));
+            } catch {
+              // ignore
+            }
+          }
+        } else {
+          window.setTimeout(() => loadPuzzleAt(puzzleIdx + 1), 350);
+        }
       } else if (subTab === 'streak') {
         const nextStreak = streakCount + 1;
         setStreakCount(nextStreak);
@@ -709,6 +1003,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
           {([
             ['daily', 'Daily Puzzle'],
             ['tactics', 'Tactics'],
+            ['blitz', 'Puzzle Blitz'],
             ['streak', 'Puzzle Streak'],
             ['storm', 'Puzzle Storm'],
             ['racer', 'Puzzle Racer'],
@@ -730,10 +1025,65 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
           ))}
         </div>
 
-        <div className="text-xs font-mono text-stone-500 dark:text-zinc-400">
-          Puzzle Rating: <strong className="text-stone-900 dark:text-zinc-100">{puzzleRating}</strong>
+        <div className="flex flex-wrap items-center gap-3 text-xs">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !competitiveTimerEnabled;
+              setCompetitiveTimerEnabled(next);
+              if (next) {
+                puzzleStartAtRef.current = Date.now();
+                setSolveElapsedMs(0);
+              }
+            }}
+            className={`px-2.5 py-1.5 rounded-lg border text-xs font-medium flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+              competitiveTimerEnabled
+                ? 'border-emerald-600/50 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+                : 'border-stone-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-stone-600 dark:text-zinc-400'
+            }`}
+            title="Toggle optional competitive puzzle solve timer"
+          >
+            <Clock className="w-3.5 h-3.5" />
+            <span>Timer: {competitiveTimerEnabled ? 'ON' : 'OFF'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenPlans}
+            className={`px-2.5 py-1.5 rounded-lg border text-xs font-mono tabular-nums flex items-center gap-1.5 whitespace-nowrap shrink-0 transition-colors ${
+              hasPuzzleQuotaRemaining
+                ? 'border-stone-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-stone-700 dark:text-zinc-300 hover:bg-stone-50 dark:hover:bg-zinc-800'
+                : 'border-amber-400 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300'
+            }`}
+          >
+            <Crown className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+            <span>
+              {PLAN_CATALOG[planTier].name}: {normUsage.puzzlesUsed}/
+              {planLimits.puzzlesPerDay === null ? '∞' : planLimits.puzzlesPerDay}
+            </span>
+          </button>
+
+          <span className="font-mono tabular-nums text-stone-500 dark:text-zinc-400">
+            Rating: <strong className="text-stone-900 dark:text-zinc-100">{puzzleRating}</strong>
+          </span>
         </div>
       </div>
+
+      {puzzleQuotaError && (
+        <div className="p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 flex flex-wrap items-center justify-between gap-3 text-xs text-amber-900 dark:text-amber-200">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 shrink-0 text-amber-600 dark:text-amber-400" />
+            <span>{puzzleQuotaError}</span>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenPlans}
+            className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold whitespace-nowrap shrink-0"
+          >
+            Choose Plan (Pro ₹100 / Max ₹1,000)
+          </button>
+        </div>
+      )}
 
       {/* ==================== ENDGAME TRAINER WORKSPACE ==================== */}
       {subTab === 'endgame' ? (
@@ -1078,29 +1428,79 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
         /* ==================== TACTICS / STREAK / STORM / RACER ==================== */
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           <div className="lg:col-span-7 flex flex-col items-center gap-3">
-            <div className="w-full max-w-[540px] flex items-center justify-between gap-2 px-3 py-2 rounded-lg bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800">
-              <div className="min-w-0">
-                <span className="text-sm font-semibold text-stone-900 dark:text-zinc-100">
+            <div className="w-full max-w-[540px] flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-lg bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800">
+              <div className="min-w-0 flex items-center gap-2.5 flex-wrap">
+                <span className="text-sm font-semibold text-stone-900 dark:text-zinc-100 truncate">
                   {activePuzzle.title}
                 </span>
-                <span className="text-xs text-stone-500 dark:text-zinc-400 ml-2 font-mono">
-                  {activePuzzle.playerColor === 'w' ? 'White to move' : 'Black to move'} · {activePuzzle.rating} ·{' '}
-                  {getPuzzleDifficulty(activePuzzle.rating).toUpperCase()}
+                <DifficultyBadge rating={activePuzzle.rating} />
+                <span className="text-xs text-stone-500 dark:text-zinc-400 font-mono tabular-nums">
+                  {activePuzzle.playerColor === 'w' ? 'White to move' : 'Black to move'} · {activePuzzle.rating}
                 </span>
               </div>
-              <span className="text-xs text-stone-500 dark:text-zinc-400 shrink-0 font-mono">
-                {subTab === 'tactics'
-                  ? `${(puzzleIdx % (allPuzzles.length || 1)) + 1}/${allPuzzles.length}`
-                  : activePuzzle.source || 'Curated'}
-              </span>
+              <div className="flex items-center gap-2.5 shrink-0 font-mono tabular-nums text-xs">
+                {competitiveTimerEnabled && (
+                  <span className="text-emerald-700 dark:text-emerald-300 font-semibold flex items-center gap-1">
+                    <Timer className="w-3.5 h-3.5" />
+                    {formatDurationMs(solveElapsedMs)}
+                  </span>
+                )}
+                <span className="text-stone-500 dark:text-zinc-400">
+                  {subTab === 'tactics'
+                    ? `${(puzzleIdx % (allPuzzles.length || 1)) + 1}/${allPuzzles.length}`
+                    : subTab === 'blitz'
+                    ? `${blitzSolvedCount}/${currentBlitzPreset.targetCount}`
+                    : activePuzzle.source || 'Curated'}
+                </span>
+              </div>
             </div>
+
+            {/* Optional Competitive Speed Telemetry Strip */}
+            {competitiveTimerEnabled && (subTab === 'daily' || subTab === 'tactics' || subTab === 'streak') && (
+              <div className="w-full max-w-[540px] flex flex-wrap items-center justify-between gap-2 px-3.5 py-2 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 text-[11px] font-mono tabular-nums text-stone-600 dark:text-zinc-400">
+                <span>
+                  Solve Clock:{' '}
+                  <strong className="text-stone-900 dark:text-zinc-100">
+                    {formatDurationMs(solveElapsedMs)}
+                  </strong>
+                </span>
+                <span>
+                  Last:{' '}
+                  <strong className="text-stone-900 dark:text-zinc-100">
+                    {lastSolveMs !== null ? formatDurationMs(lastSolveMs) : '--'}
+                  </strong>
+                </span>
+                <span>
+                  Avg:{' '}
+                  <strong className="text-stone-900 dark:text-zinc-100">
+                    {solveHistoryMs.length > 0
+                      ? formatDurationMs(
+                          solveHistoryMs.reduce((a, b) => a + b, 0) / solveHistoryMs.length
+                        )
+                      : '--'}
+                  </strong>
+                </span>
+                <span>
+                  Best:{' '}
+                  <strong className="text-emerald-600 dark:text-emerald-400">
+                    {bestSolveMs !== null ? formatDurationMs(bestSolveMs) : '--'}
+                  </strong>
+                </span>
+              </div>
+            )}
 
             <ChessBoard
               state={puzzleState}
               onMove={handlePuzzleMove}
               flipped={activePuzzle.playerColor === 'b'}
               allowedColor={activePuzzle.playerColor}
-              interactive={!streakEnded && feedback !== 'solved'}
+              interactive={
+                !streakEnded &&
+                feedback !== 'solved' &&
+                (subTab !== 'blitz' || blitzStatus === 'active') &&
+                (subTab !== 'storm' || stormActive) &&
+                (subTab !== 'racer' || racerActive)
+              }
               suggestedArrows={dailyHintArrow}
               boardTheme={prefs.boardTheme}
               pieceSet={prefs.pieceSet}
@@ -1116,15 +1516,18 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
               return (
                 <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-5 space-y-4">
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <Calendar className="w-4 h-4 text-emerald-600" />
-                      <h2 className="text-base font-semibold text-stone-900 dark:text-zinc-100">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <Calendar className="w-4 h-4 text-emerald-600 shrink-0" />
+                      <h2 className="text-base font-semibold text-stone-900 dark:text-zinc-100 truncate">
                         {isTodaySelected ? "Today's Daily Puzzle" : `Daily Archive · ${selectedDailyDate}`}
                       </h2>
                     </div>
-                    <span className="text-xs font-mono text-stone-500 dark:text-zinc-400">
-                      {dailyEntry.difficulty} · {dailyEntry.rating}
-                    </span>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <DifficultyBadge rating={dailyEntry.rating} />
+                      <span className="text-xs font-mono tabular-nums text-stone-500 dark:text-zinc-400">
+                        {dailyEntry.rating}
+                      </span>
+                    </div>
                   </div>
 
                   {/* Date navigation & Daily Streak */}
@@ -1187,7 +1590,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
 
                   {feedback === 'solved' && (
                     <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-xs font-medium text-emerald-800 dark:text-emerald-200">
-                      Daily Puzzle Solved! (+18 rating · {solvedDailyDates.length}/{DAILY_PUZZLE_DATABASE.length} archive days cleared)
+                      Daily Puzzle Solved{lastSolveMs !== null ? ` in ${formatDurationMs(lastSolveMs)}` : ''}! (+18 rating · {solvedDailyDates.length}/{DAILY_PUZZLE_DATABASE.length} archive days cleared)
                     </div>
                   )}
                   {feedback === 'wrong' && (
@@ -1304,13 +1707,17 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
                   </p>
                 )}
 
-                <div className="text-xs text-stone-600 dark:text-zinc-400">
-                  Themes: {activePuzzle.themes.join(' · ')}
+                <div className="flex items-center justify-between gap-2 text-xs text-stone-600 dark:text-zinc-400">
+                  <span className="truncate">Themes: {activePuzzle.themes.join(' · ')}</span>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <DifficultyBadge rating={activePuzzle.rating} />
+                    <span className="font-mono tabular-nums">{activePuzzle.rating}</span>
+                  </div>
                 </div>
 
                 {feedback === 'solved' && (
                   <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-xs font-medium text-emerald-800 dark:text-emerald-200">
-                    Puzzle Solved! (+14 rating)
+                    Puzzle Solved{lastSolveMs !== null ? ` in ${formatDurationMs(lastSolveMs)}` : ''}! (+14 rating)
                   </div>
                 )}
                 {feedback === 'wrong' && (
@@ -1345,6 +1752,161 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
                     Next Puzzle
                   </button>
                 </div>
+              </div>
+            )}
+
+            {/* PUZZLE BLITZ PANEL */}
+            {subTab === 'blitz' && (
+              <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-5 space-y-4">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Timer className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
+                    <h2 className="text-base font-semibold text-stone-900 dark:text-zinc-100">
+                      Puzzle Blitz Series
+                    </h2>
+                  </div>
+                  <span
+                    className={`font-mono text-lg font-bold tabular-nums ${
+                      blitzRemainingMs <= 10_000 && blitzStatus === 'active'
+                        ? 'text-red-600 dark:text-red-400'
+                        : 'text-stone-900 dark:text-zinc-100'
+                    }`}
+                  >
+                    {formatDurationMs(blitzRemainingMs)}
+                  </span>
+                </div>
+
+                {/* Time Constraint & Target Preset Selector */}
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-stone-500 dark:text-zinc-400">
+                    Series Format & Total Clock
+                  </div>
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {BLITZ_PRESETS.map((preset, idx) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        disabled={blitzStatus === 'active'}
+                        onClick={() => {
+                          setBlitzPresetIdx(idx);
+                          setBlitzRemainingMs(preset.totalSeconds * 1000);
+                          setBlitzStatus('idle');
+                        }}
+                        className={`py-2 px-2 rounded-lg border text-[11px] font-semibold transition-colors disabled:opacity-50 ${
+                          blitzPresetIdx === idx
+                            ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+                            : 'border-stone-200 dark:border-zinc-800 text-stone-600 dark:text-zinc-300 hover:bg-stone-50 dark:hover:bg-zinc-800'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Progress Bar & Counters */}
+                <div className="space-y-2">
+                  <div className="h-2 rounded-full bg-stone-100 dark:bg-zinc-800 overflow-hidden">
+                    <div
+                      className={`h-full transition-all duration-100 ${
+                        blitzRemainingMs <= 10_000 ? 'bg-red-500' : 'bg-emerald-600'
+                      }`}
+                      style={{
+                        width: `${Math.min(
+                          100,
+                          (blitzRemainingMs / (currentBlitzPreset.totalSeconds * 1000)) * 100
+                        )}%`,
+                      }}
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-3 gap-2 text-center">
+                    <div className="p-2.5 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800">
+                      <div className="text-[11px] text-stone-500 dark:text-zinc-400">Series</div>
+                      <div className="text-base font-mono font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
+                        {blitzSolvedCount}/{currentBlitzPreset.targetCount}
+                      </div>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800">
+                      <div className="text-[11px] text-stone-500 dark:text-zinc-400">Mistakes</div>
+                      <div className="text-base font-mono font-bold tabular-nums text-stone-900 dark:text-zinc-100">
+                        {blitzWrongCount}
+                      </div>
+                    </div>
+                    <div className="p-2.5 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800">
+                      <div className="text-[11px] text-stone-500 dark:text-zinc-400">Best Time</div>
+                      <div className="text-base font-mono font-bold tabular-nums text-stone-900 dark:text-zinc-100">
+                        {blitzBestTimes[currentBlitzPreset.id]
+                          ? formatDurationMs(blitzBestTimes[currentBlitzPreset.id])
+                          : '--'}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {blitzStatus === 'cleared' && (
+                  <div className="p-3.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-900 text-xs text-emerald-800 dark:text-emerald-200 space-y-1">
+                    <div className="font-semibold">
+                      Blitz Series Cleared! ({currentBlitzPreset.targetCount}/{currentBlitzPreset.targetCount} solved)
+                    </div>
+                    <div className="font-mono tabular-nums">
+                      Total Time: {formatDurationMs(blitzElapsedTotalMs)} · Avg:{' '}
+                      {formatDurationMs(blitzElapsedTotalMs / currentBlitzPreset.targetCount)}/puzzle
+                    </div>
+                  </div>
+                )}
+
+                {blitzStatus === 'timeout' && (
+                  <div className="p-3.5 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-900 text-xs text-amber-800 dark:text-amber-200 space-y-1">
+                    <div className="font-semibold">
+                      Time Expired — Solved {blitzSolvedCount} of {currentBlitzPreset.targetCount}
+                    </div>
+                    <div>
+                      Wrong moves subtract 3 seconds from your total clock. Try another Blitz run!
+                    </div>
+                  </div>
+                )}
+
+                {blitzStatus === 'active' && feedback === 'wrong' && (
+                  <div className="p-2.5 rounded-lg bg-red-50 dark:bg-red-950/40 border border-red-200 dark:border-red-900 text-xs text-red-700 dark:text-red-300">
+                    Incorrect move (-3.0s penalty). Keep solving!
+                  </div>
+                )}
+
+                {blitzSplitsMs.length > 0 && (
+                  <div className="space-y-1">
+                    <div className="text-[11px] font-medium text-stone-500 dark:text-zinc-400">
+                      Puzzle Split Times
+                    </div>
+                    <div className="flex flex-wrap gap-1.5 text-[11px] font-mono tabular-nums">
+                      {blitzSplitsMs.map((ms, i) => (
+                        <span
+                          key={i}
+                          className="px-2 py-0.5 rounded bg-stone-100 dark:bg-zinc-800 text-stone-700 dark:text-zinc-300"
+                        >
+                          #{i + 1}: {formatDurationMs(ms)}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <p className="text-xs text-stone-600 dark:text-zinc-400">
+                  Solve all {currentBlitzPreset.targetCount} puzzles before the {currentBlitzPreset.totalSeconds}s total clock runs out. Mistakes deduct 3s.
+                </p>
+
+                <button
+                  type="button"
+                  onClick={() => startBlitzSeries(blitzPresetIdx)}
+                  className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5 cursor-pointer"
+                >
+                  <Play className="w-4 h-4" />
+                  {blitzStatus === 'active'
+                    ? 'Restart Blitz Series'
+                    : blitzStatus === 'cleared' || blitzStatus === 'timeout'
+                    ? 'Play Again'
+                    : 'Start Blitz Series'}
+                </button>
               </div>
             )}
 
@@ -1506,6 +2068,74 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({ prefs, userGamePuzzles
             />
           </div>
         </div>
+      )}
+
+      {/* ==================== TACTICS PUZZLE CARDS BROWSER ==================== */}
+      {subTab === 'tactics' && (
+        <section className="space-y-3 pt-2">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-semibold text-stone-900 dark:text-zinc-100">
+                Puzzle Library
+              </h3>
+              <p className="text-xs text-stone-500 dark:text-zinc-400">
+                Select any puzzle card to jump directly to the position. Easy (&lt;1300) · Medium (1300–1599) · Hard (1600+)
+              </p>
+            </div>
+            <div className="flex items-center gap-3 text-xs text-stone-500 dark:text-zinc-400 font-mono tabular-nums">
+              <span>{allPuzzles.length} shown</span>
+              <span aria-hidden="true">·</span>
+              <span>{solvedPuzzleIds.length} solved</span>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+            {allPuzzles.map((puz, idx) => {
+              const isSelected = activePuzzle.id === puz.id;
+              const isSolved = solvedPuzzleIds.includes(puz.id);
+              return (
+                <button
+                  key={puz.id}
+                  type="button"
+                  onClick={() => loadPuzzleAt(idx)}
+                  className={`text-left rounded-xl border p-4 transition-colors space-y-2 cursor-pointer ${
+                    isSelected
+                      ? 'border-emerald-600 bg-emerald-50/50 dark:bg-emerald-950/25'
+                      : 'border-stone-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:border-stone-300 dark:hover:border-zinc-700'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0 flex items-center gap-1.5">
+                      <span className="text-xs font-mono tabular-nums text-stone-400 dark:text-zinc-500 shrink-0">
+                        #{idx + 1}
+                      </span>
+                      <span className="text-sm font-semibold text-stone-900 dark:text-zinc-100 truncate">
+                        {puz.title}
+                      </span>
+                      {isSolved && (
+                        <CheckCircle2
+                          className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0"
+                          aria-label="Solved"
+                        />
+                      )}
+                    </div>
+                    <DifficultyBadge rating={puz.rating} />
+                  </div>
+
+                  <div className="flex items-center gap-2 text-xs text-stone-500 dark:text-zinc-400 font-mono tabular-nums">
+                    <span>Rating {puz.rating}</span>
+                    <span aria-hidden="true">·</span>
+                    <span>{puz.playerColor === 'w' ? 'White' : 'Black'} to move</span>
+                  </div>
+
+                  <div className="text-xs text-stone-600 dark:text-zinc-400 truncate">
+                    {puz.themes.join(' · ')}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </section>
       )}
     </div>
   );

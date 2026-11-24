@@ -2,11 +2,23 @@ import React, { useEffect, useState } from 'react';
 import {
   AuthUser,
   ChessVariant,
+  DailyQuotaUsage,
   GameRecord,
   Move,
+  PaymentMethod,
+  PaymentOrderInfo,
+  PaymentReceipt,
+  PlanTier,
   Puzzle,
   UserPreferences,
 } from './types/chess';
+import {
+  canConsumeQuota,
+  getPlanLimits,
+  getTodayQuotaDate,
+  normalizeQuotaUsage,
+  PLAN_CATALOG,
+} from './data/plans';
 import { parsePgn } from './engine/chessEngine';
 import { detectOpeningFromMoves } from './data/openings';
 import { LANGUAGES, translate } from './data/i18n';
@@ -18,6 +30,7 @@ import { TournamentsView } from './components/TournamentsView';
 import { CommunityView } from './components/CommunityView';
 import { PreferencesModal } from './components/PreferencesModal';
 import { AuthModal } from './components/AuthModal';
+import { PlansModal } from './components/PlansModal';
 import { soundFX } from './utils/sound';
 import { SlidersHorizontal, User } from 'lucide-react';
 
@@ -104,6 +117,67 @@ export default function App() {
   const [authToken, setAuthToken] = useState<string | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
+  const [plansModalOpen, setPlansModalOpen] = useState(false);
+
+  const loadGuestPlanState = (): { plan: PlanTier; usage: DailyQuotaUsage } => {
+    try {
+      const raw = localStorage.getItem('caissa_guest_plan_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw) as { plan?: PlanTier; usage?: DailyQuotaUsage };
+        const plan: PlanTier =
+          parsed.plan === 'pro' || parsed.plan === 'max' ? parsed.plan : 'free';
+        return { plan, usage: normalizeQuotaUsage(parsed.usage) };
+      }
+    } catch {
+      // ignore
+    }
+    return {
+      plan: 'free',
+      usage: { date: getTodayQuotaDate(), analysisUsed: 0, puzzlesUsed: 0 },
+    };
+  };
+
+  const loadGuestReceipts = (): PaymentReceipt[] => {
+    try {
+      const raw = localStorage.getItem('caissa_guest_receipts_v1');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      }
+    } catch {
+      // ignore
+    }
+    return [];
+  };
+
+  const [planTier, setPlanTier] = useState<PlanTier>(() => loadGuestPlanState().plan);
+  const [dailyUsage, setDailyUsage] = useState<DailyQuotaUsage>(() => loadGuestPlanState().usage);
+  const [paymentReceipts, setPaymentReceipts] = useState<PaymentReceipt[]>(() =>
+    loadGuestReceipts()
+  );
+
+  useEffect(() => {
+    if (!authUser) {
+      try {
+        localStorage.setItem(
+          'caissa_guest_plan_v1',
+          JSON.stringify({ plan: planTier, usage: normalizeQuotaUsage(dailyUsage) })
+        );
+      } catch {
+        // ignore
+      }
+    }
+  }, [planTier, dailyUsage, authUser]);
+
+  useEffect(() => {
+    if (!authUser) {
+      try {
+        localStorage.setItem('caissa_guest_receipts_v1', JSON.stringify(paymentReceipts));
+      } catch {
+        // ignore
+      }
+    }
+  }, [paymentReceipts, authUser]);
 
   const openAuthModal = (mode: 'login' | 'register' = 'login') => {
     setAuthModalMode(mode);
@@ -114,6 +188,20 @@ export default function App() {
     setAuthToken(token);
     setAuthUser(user);
     setPrefs((prev) => ({ ...prev, username: user.username }));
+    if (user.plan) setPlanTier(user.plan);
+    if (user.quota) setDailyUsage(normalizeQuotaUsage(user.quota));
+    fetch('/api/payments/history', {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+      .then((r) => r.json())
+      .then((d) => {
+        if (Array.isArray(d?.receipts)) {
+          setPaymentReceipts(d.receipts);
+        }
+      })
+      .catch(() => {
+        setPaymentReceipts([]);
+      });
   };
 
   const handleLogout = async () => {
@@ -121,6 +209,10 @@ export default function App() {
     setAuthToken(null);
     setAuthUser(null);
     setPrefs((prev) => ({ ...prev, username: DEFAULT_PREFS.username }));
+    const guest = loadGuestPlanState();
+    setPlanTier(guest.plan);
+    setDailyUsage(guest.usage);
+    setPaymentReceipts(loadGuestReceipts());
     if (token) {
       try {
         await fetch('/api/auth/logout', {
@@ -131,6 +223,199 @@ export default function App() {
         // Ignore network errors on logout
       }
     }
+  };
+
+  const handleDowngradeToFree = async (): Promise<{ ok: boolean; error?: string }> => {
+    if (authToken) {
+      try {
+        const resp = await fetch('/api/account/plan', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({ plan: 'free' }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          return { ok: false, error: data?.error || 'Could not switch to Free plan.' };
+        }
+        setPlanTier('free');
+        if (data.quota) setDailyUsage(normalizeQuotaUsage(data.quota));
+        if (data.user) setAuthUser(data.user);
+        return { ok: true };
+      } catch {
+        return { ok: false, error: 'Unable to reach server.' };
+      }
+    }
+    setPlanTier('free');
+    setDailyUsage((prev) => normalizeQuotaUsage(prev));
+    return { ok: true };
+  };
+
+  const handleCreatePaymentOrder = async (
+    plan: Exclude<PlanTier, 'free'>
+  ): Promise<{ ok: boolean; order?: PaymentOrderInfo; error?: string }> => {
+    if (authToken) {
+      try {
+        const resp = await fetch('/api/payments/create-order', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({ plan }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || !data?.orderId) {
+          return { ok: false, error: data?.error || 'Could not start checkout.' };
+        }
+        return { ok: true, order: data as PaymentOrderInfo };
+      } catch {
+        return { ok: false, error: 'Unable to reach payment server.' };
+      }
+    }
+
+    const amountInr = PLAN_CATALOG[plan].priceInr;
+    return {
+      ok: true,
+      order: {
+        orderId: `ord_guest_${Date.now().toString(36)}`,
+        orderToken: 'guest_checkout',
+        plan,
+        amountInr,
+        currency: 'INR',
+        provider: 'sandbox',
+      },
+    };
+  };
+
+  const handleVerifyPayment = async (payload: {
+    order: PaymentOrderInfo;
+    method: PaymentMethod;
+    upiId?: string;
+    bankName?: string;
+    otpCode?: string;
+  }): Promise<{ ok: boolean; receipt?: PaymentReceipt; error?: string }> => {
+    const { order, method, upiId, bankName, otpCode } = payload;
+
+    if (authToken) {
+      try {
+        const resp = await fetch('/api/payments/verify', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({
+            orderId: order.orderId,
+            orderToken: order.orderToken,
+            method,
+            upiId,
+            bankName,
+            otpCode,
+          }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok || !data?.receipt) {
+          return { ok: false, error: data?.error || 'Payment verification failed.' };
+        }
+        setPlanTier(data.plan || order.plan);
+        if (data.quota) setDailyUsage(normalizeQuotaUsage(data.quota));
+        if (data.user) setAuthUser(data.user);
+        setPaymentReceipts((prev) => [data.receipt as PaymentReceipt, ...prev]);
+        return { ok: true, receipt: data.receipt as PaymentReceipt };
+      } catch {
+        return { ok: false, error: 'Unable to reach payment server.' };
+      }
+    }
+
+    // Guest local validation & receipt
+    let methodLabel = '';
+    if (method === 'upi') {
+      const cleanUpi = (upiId || '').trim();
+      if (!/^[a-zA-Z0-9._-]{2,64}@[a-zA-Z0-9]{2,32}$/.test(cleanUpi)) {
+        return { ok: false, error: 'Enter a valid UPI ID (for example, name@okicici).' };
+      }
+      methodLabel = `UPI (${cleanUpi})`;
+    } else if (method === 'netbanking') {
+      if (!bankName || bankName.trim().length < 2) {
+        return { ok: false, error: 'Select a bank for NetBanking authorization.' };
+      }
+      if (!/^\d{4,6}$/.test((otpCode || '').trim())) {
+        return { ok: false, error: 'Enter a 4–6 digit bank authorization OTP (e.g. 123456).' };
+      }
+      methodLabel = `NetBanking (${bankName.trim()})`;
+    } else {
+      if (!/^\d{4,6}$/.test((otpCode || '').trim())) {
+        return { ok: false, error: 'Enter a 4–6 digit 3DS OTP confirmation (e.g. 123456).' };
+      }
+      methodLabel = 'Card (3DS Tokenized)';
+    }
+
+    const receipt: PaymentReceipt = {
+      receiptId: `rcpt_${Date.now().toString(36)}`,
+      orderId: order.orderId,
+      plan: order.plan,
+      amountInr: order.amountInr,
+      currency: 'INR',
+      method,
+      methodLabel,
+      status: 'paid',
+      paidAt: new Date().toISOString(),
+    };
+    setPlanTier(order.plan);
+    setDailyUsage((prev) => normalizeQuotaUsage(prev));
+    setPaymentReceipts((prev) => [receipt, ...prev]);
+    return { ok: true, receipt };
+  };
+
+  const handleConsumeQuota = async (
+    kind: 'analysis' | 'puzzle'
+  ): Promise<{ allowed: boolean; error?: string }> => {
+    const norm = normalizeQuotaUsage(dailyUsage);
+    if (!canConsumeQuota(planTier, norm, kind)) {
+      const limits = getPlanLimits(planTier);
+      const cap = kind === 'analysis' ? limits.analysisPerDay : limits.puzzlesPerDay;
+      return {
+        allowed: false,
+        error: `Daily ${kind} limit reached (${cap}/day on ${PLAN_CATALOG[planTier].name}). Upgrade to Pro or Max for more.`,
+      };
+    }
+
+    if (authToken) {
+      try {
+        const resp = await fetch('/api/account/usage', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${authToken}`,
+          },
+          body: JSON.stringify({ kind }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (data?.quota) {
+          setDailyUsage(normalizeQuotaUsage(data.quota));
+        }
+        if (!resp.ok) {
+          return {
+            allowed: false,
+            error: data?.error || 'Daily quota exceeded.',
+          };
+        }
+        return { allowed: true };
+      } catch {
+        return { allowed: false, error: 'Unable to verify quota with server.' };
+      }
+    }
+
+    const updated: DailyQuotaUsage = {
+      date: norm.date,
+      analysisUsed: norm.analysisUsed + (kind === 'analysis' ? 1 : 0),
+      puzzlesUsed: norm.puzzlesUsed + (kind === 'puzzle' ? 1 : 0),
+    };
+    setDailyUsage(updated);
+    return { allowed: true };
   };
 
   const [games, setGames] = useState<GameRecord[]>(() => {
@@ -368,6 +653,10 @@ export default function App() {
                 }
                 onPlayFromPosition={handlePlayFromPosition}
                 onImportGameRecord={(rec) => setGames((prev) => [rec, ...prev])}
+                planTier={planTier}
+                dailyUsage={dailyUsage}
+                onConsumeAnalysisQuota={() => handleConsumeQuota('analysis')}
+                onOpenPlans={() => setPlansModalOpen(true)}
               />
             ) : (
               <StudiesView
@@ -382,7 +671,14 @@ export default function App() {
         )}
 
         {activeTab === 'puzzles' && (
-          <PuzzlesView prefs={prefs} userGamePuzzles={userGamePuzzles} />
+          <PuzzlesView
+            prefs={prefs}
+            userGamePuzzles={userGamePuzzles}
+            planTier={planTier}
+            dailyUsage={dailyUsage}
+            onConsumePuzzleQuota={() => handleConsumeQuota('puzzle')}
+            onOpenPlans={() => setPlansModalOpen(true)}
+          />
         )}
 
         {activeTab === 'tournaments' && (
@@ -410,6 +706,13 @@ export default function App() {
             Caissa Chess · {t('zeroAds')} · Standard & 8 Variants · Local-first PGN & Studies
           </span>
           <div className="flex items-center gap-4">
+            <button
+              type="button"
+              onClick={() => setPlansModalOpen(true)}
+              className="hover:text-stone-900 dark:hover:text-zinc-200 underline-offset-2 hover:underline"
+            >
+              Plan: {PLAN_CATALOG[planTier].name}
+            </button>
             <button
               type="button"
               onClick={() =>
@@ -445,6 +748,21 @@ export default function App() {
         authToken={authToken}
         onAuthSuccess={handleAuthSuccess}
         onLogout={handleLogout}
+        planTier={planTier}
+        onOpenPlans={() => setPlansModalOpen(true)}
+      />
+
+      <PlansModal
+        open={plansModalOpen}
+        onClose={() => setPlansModalOpen(false)}
+        currentPlan={planTier}
+        usage={dailyUsage}
+        authUser={authUser}
+        receipts={paymentReceipts}
+        onDowngradeFree={handleDowngradeToFree}
+        onCreatePaymentOrder={handleCreatePaymentOrder}
+        onVerifyPayment={handleVerifyPayment}
+        onOpenAuth={openAuthModal}
       />
     </div>
   );

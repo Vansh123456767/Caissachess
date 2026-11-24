@@ -11,6 +11,14 @@ import {
   type PuzzleDifficulty,
   type PuzzleSortOrder,
 } from './src/data/puzzleCatalog.ts';
+import {
+  getPlanLimits,
+  getTodayQuotaDate,
+  normalizeQuotaUsage,
+  PLAN_CATALOG,
+  type DailyQuotaUsage,
+  type PlanTier,
+} from './src/data/plans.ts';
 
 dotenv.config();
 
@@ -35,6 +43,8 @@ interface StoredUser {
   passwordHash: string;
   rating: number;
   createdAt: string;
+  plan?: PlanTier;
+  quota?: DailyQuotaUsage;
 }
 
 interface StoredTournamentPlayer {
@@ -63,9 +73,26 @@ interface StoredTournament {
   createdBy?: string;
 }
 
+interface StoredPaymentOrder {
+  orderId: string;
+  orderToken: string;
+  userId: string;
+  plan: 'pro' | 'max';
+  amountInr: number;
+  currency: 'INR';
+  provider: 'stripe' | 'razorpay' | 'sandbox';
+  status: 'pending' | 'paid';
+  method?: 'upi' | 'netbanking' | 'card';
+  methodLabel?: string;
+  receiptId?: string;
+  createdAt: string;
+  paidAt?: string;
+}
+
 interface StoreData {
   users: StoredUser[];
   tournaments: StoredTournament[];
+  payments: StoredPaymentOrder[];
 }
 
 const VALID_VARIANTS = new Set([
@@ -151,6 +178,7 @@ function loadStore(): StoreData {
           Array.isArray(parsed.tournaments) && parsed.tournaments.length > 0
             ? parsed.tournaments
             : createDefaultTournaments(),
+        payments: Array.isArray(parsed.payments) ? parsed.payments : [],
       };
     }
   } catch {
@@ -159,6 +187,7 @@ function loadStore(): StoreData {
   const initial: StoreData = {
     users: [],
     tournaments: createDefaultTournaments(),
+    payments: [],
   };
   saveStore(initial);
   return initial;
@@ -253,12 +282,25 @@ function verifyToken(token: string): { user: StoredUser; jti: string } | null {
   }
 }
 
+function resolveUserPlan(u: StoredUser): {
+  plan: PlanTier;
+  quota: DailyQuotaUsage;
+} {
+  const plan: PlanTier =
+    u.plan === 'pro' || u.plan === 'max' ? u.plan : 'free';
+  const quota = normalizeQuotaUsage(u.quota);
+  return { plan, quota };
+}
+
 function toPublicUser(u: StoredUser) {
+  const { plan, quota } = resolveUserPlan(u);
   return {
     id: u.id,
     username: u.username,
     rating: u.rating,
     createdAt: u.createdAt,
+    plan,
+    quota,
   };
 }
 
@@ -334,6 +376,17 @@ function formatTournamentForClient(t: StoredTournament, userId?: string) {
   };
 }
 
+function normalizeUsername(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  return raw
+    .normalize('NFKC')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+const USERNAME_REGEX = /^[\p{L}\p{N}_. @+-]{3,48}$/u;
+
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '100kb' }));
@@ -341,12 +394,13 @@ async function startServer() {
   // ==================== AUTHENTICATION ROUTES ====================
   app.post('/api/auth/register', (req: Request, res: Response) => {
     if (!checkAuthRateLimit(req, res)) return;
-    const rawUsername = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const rawUsername = normalizeUsername(req.body?.username);
     const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
 
-    if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(rawUsername)) {
+    if (rawUsername.length < 3 || rawUsername.length > 48 || !USERNAME_REGEX.test(rawUsername)) {
       res.status(400).json({
-        error: 'Username must be 3 to 32 characters using letters, numbers, _, ., or -.',
+        error:
+          'Username must be 3 to 48 characters (letters, numbers, spaces, _, ., -, @, or +).',
       });
       return;
     }
@@ -370,6 +424,8 @@ async function startServer() {
       passwordHash: hashPassword(rawPassword),
       rating: 1620,
       createdAt: new Date().toISOString(),
+      plan: 'free',
+      quota: { date: getTodayQuotaDate(), analysisUsed: 0, puzzlesUsed: 0 },
     };
     store.users.push(user);
     saveStore(store);
@@ -380,7 +436,7 @@ async function startServer() {
 
   app.post('/api/auth/login', (req: Request, res: Response) => {
     if (!checkAuthRateLimit(req, res)) return;
-    const rawUsername = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
+    const rawUsername = normalizeUsername(req.body?.username);
     const rawPassword = typeof req.body?.password === 'string' ? req.body.password : '';
 
     if (!rawUsername || !rawPassword) {
@@ -408,6 +464,249 @@ async function startServer() {
       revokedTokenIds.add(req.authJti);
     }
     res.json({ ok: true });
+  });
+
+  // ==================== ACCOUNT PLAN & QUOTA ROUTES ====================
+  app.get('/api/account/plan', requireAuth, (req: AuthedRequest, res: Response) => {
+    const user = req.authUser!;
+    const { plan, quota } = resolveUserPlan(user);
+    if (user.quota?.date !== quota.date || !user.plan) {
+      user.plan = plan;
+      user.quota = quota;
+      saveStore(store);
+    }
+    res.json({
+      plan,
+      quota,
+      limits: getPlanLimits(plan),
+    });
+  });
+
+  app.post('/api/account/plan', requireAuth, (req: AuthedRequest, res: Response) => {
+    const user = req.authUser!;
+    const rawPlan: unknown = req.body?.plan;
+    if (rawPlan !== 'free' && rawPlan !== 'pro' && rawPlan !== 'max') {
+      res.status(400).json({ error: 'Invalid plan tier. Choose free, pro, or max.' });
+      return;
+    }
+    if (rawPlan === 'pro' || rawPlan === 'max') {
+      const amount = PLAN_CATALOG[rawPlan].priceInr;
+      res.status(402).json({
+        error: `Payment of ₹${amount} is required to activate ${PLAN_CATALOG[rawPlan].name}. Complete checkout first.`,
+      });
+      return;
+    }
+    user.plan = 'free';
+    user.quota = normalizeQuotaUsage(user.quota);
+    saveStore(store);
+    res.json({
+      plan: 'free',
+      quota: user.quota,
+      limits: getPlanLimits('free'),
+      user: toPublicUser(user),
+    });
+  });
+
+  // ==================== PAYMENTS & CHECKOUT ROUTES ====================
+  app.post('/api/payments/create-order', requireAuth, (req: AuthedRequest, res: Response) => {
+    const user = req.authUser!;
+    const rawPlan: unknown = req.body?.plan;
+    if (rawPlan !== 'pro' && rawPlan !== 'max') {
+      res.status(400).json({ error: 'Checkout is only required for Pro (₹100) or Max (₹1,000).' });
+      return;
+    }
+
+    const plan: PlanTier = rawPlan;
+    const amountInr = PLAN_CATALOG[plan].priceInr;
+    const orderId = `ord_${crypto.randomUUID().replace(/-/g, '').slice(0, 14)}`;
+    const orderToken = crypto
+      .createHmac('sha256', SESSION_SECRET)
+      .update(`${orderId}:${user.id}:${plan}:${amountInr}`)
+      .digest('hex');
+
+    const order: StoredPaymentOrder = {
+      orderId,
+      orderToken,
+      userId: user.id,
+      plan,
+      amountInr,
+      currency: 'INR',
+      provider: 'sandbox',
+      status: 'pending',
+      createdAt: new Date().toISOString(),
+    };
+    store.payments.push(order);
+    saveStore(store);
+
+    res.status(201).json({
+      orderId: order.orderId,
+      orderToken: order.orderToken,
+      plan: order.plan,
+      amountInr: order.amountInr,
+      currency: order.currency,
+      provider: order.provider,
+    });
+  });
+
+  app.post('/api/payments/verify', requireAuth, (req: AuthedRequest, res: Response) => {
+    const user = req.authUser!;
+    const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
+    const orderToken = typeof req.body?.orderToken === 'string' ? req.body.orderToken.trim() : '';
+    const method = req.body?.method;
+    const upiId = typeof req.body?.upiId === 'string' ? req.body.upiId.trim() : '';
+    const bankName = typeof req.body?.bankName === 'string' ? req.body.bankName.trim() : '';
+    const otpCode = typeof req.body?.otpCode === 'string' ? req.body.otpCode.trim() : '';
+
+    if (!orderId || !orderToken) {
+      res.status(400).json({ error: 'Missing order reference.' });
+      return;
+    }
+    if (method !== 'upi' && method !== 'netbanking' && method !== 'card') {
+      res.status(400).json({ error: 'Select a valid payment method (UPI, NetBanking, or Card).' });
+      return;
+    }
+
+    let methodLabel = '';
+    if (method === 'upi') {
+      if (!/^[a-zA-Z0-9._-]{2,64}@[a-zA-Z0-9]{2,32}$/.test(upiId)) {
+        res.status(400).json({ error: 'Enter a valid UPI ID (for example, name@okicici).' });
+        return;
+      }
+      methodLabel = `UPI (${upiId})`;
+    } else if (method === 'netbanking') {
+      if (bankName.length < 2 || bankName.length > 40) {
+        res.status(400).json({ error: 'Select a bank for NetBanking authorization.' });
+        return;
+      }
+      if (!/^\d{4,6}$/.test(otpCode)) {
+        res.status(400).json({ error: 'Enter the 4–6 digit bank authorization OTP (e.g. 123456).' });
+        return;
+      }
+      methodLabel = `NetBanking (${bankName})`;
+    } else {
+      if (!/^\d{4,6}$/.test(otpCode)) {
+        res.status(400).json({ error: 'Complete gateway 3DS OTP confirmation (4–6 digits, e.g. 123456).' });
+        return;
+      }
+      methodLabel = 'Card (3DS Tokenized)';
+    }
+
+    const order = store.payments.find((p) => p.orderId === orderId && p.userId === user.id);
+    if (!order) {
+      res.status(404).json({ error: 'Payment order not found for this account.' });
+      return;
+    }
+    if (order.status === 'paid') {
+      res.status(409).json({ error: 'This payment order has already been completed.' });
+      return;
+    }
+
+    const expectedToken = crypto
+      .createHmac('sha256', SESSION_SECRET)
+      .update(`${order.orderId}:${user.id}:${order.plan}:${order.amountInr}`)
+      .digest('hex');
+    const suppliedBuf = Buffer.from(orderToken, 'utf8');
+    const expectedBuf = Buffer.from(expectedToken, 'utf8');
+    if (
+      suppliedBuf.length !== expectedBuf.length ||
+      !crypto.timingSafeEqual(suppliedBuf, expectedBuf)
+    ) {
+      res.status(403).json({ error: 'Payment verification signature mismatch.' });
+      return;
+    }
+
+    const receiptId = `rcpt_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
+    const paidAt = new Date().toISOString();
+
+    order.status = 'paid';
+    order.method = method;
+    order.methodLabel = methodLabel;
+    order.receiptId = receiptId;
+    order.paidAt = paidAt;
+
+    user.plan = order.plan;
+    user.quota = normalizeQuotaUsage(user.quota);
+    saveStore(store);
+
+    res.json({
+      ok: true,
+      plan: order.plan,
+      quota: user.quota,
+      limits: getPlanLimits(order.plan),
+      user: toPublicUser(user),
+      receipt: {
+        receiptId,
+        orderId: order.orderId,
+        plan: order.plan,
+        amountInr: order.amountInr,
+        currency: order.currency,
+        method,
+        methodLabel,
+        status: 'paid' as const,
+        paidAt,
+      },
+    });
+  });
+
+  app.get('/api/payments/history', requireAuth, (req: AuthedRequest, res: Response) => {
+    const user = req.authUser!;
+    const receipts = store.payments
+      .filter((p) => p.userId === user.id && p.status === 'paid')
+      .map((p) => ({
+        receiptId: p.receiptId || p.orderId,
+        orderId: p.orderId,
+        plan: p.plan,
+        amountInr: p.amountInr,
+        currency: p.currency,
+        method: p.method || 'upi',
+        methodLabel: p.methodLabel || 'UPI',
+        status: 'paid' as const,
+        paidAt: p.paidAt || p.createdAt,
+      }))
+      .sort((a, b) => b.paidAt.localeCompare(a.paidAt));
+    res.json({ receipts });
+  });
+
+  app.post('/api/account/usage', requireAuth, (req: AuthedRequest, res: Response) => {
+    const user = req.authUser!;
+    const kind = req.body?.kind;
+    if (kind !== 'analysis' && kind !== 'puzzle') {
+      res.status(400).json({ error: 'Invalid usage type.' });
+      return;
+    }
+    const { plan, quota } = resolveUserPlan(user);
+    const limits = getPlanLimits(plan);
+
+    if (kind === 'analysis') {
+      if (limits.analysisPerDay !== null && quota.analysisUsed >= limits.analysisPerDay) {
+        res.status(403).json({
+          code: 'QUOTA_EXCEEDED',
+          error: `Daily analysis limit reached (${limits.analysisPerDay}/day on ${plan.toUpperCase()}). Upgrade to Pro or Max for more analyses.`,
+          plan,
+          quota,
+          limits,
+        });
+        return;
+      }
+      quota.analysisUsed += 1;
+    } else {
+      if (limits.puzzlesPerDay !== null && quota.puzzlesUsed >= limits.puzzlesPerDay) {
+        res.status(403).json({
+          code: 'QUOTA_EXCEEDED',
+          error: `Daily puzzle limit reached (${limits.puzzlesPerDay}/day on ${plan.toUpperCase()}). Upgrade to Pro or Max to continue solving today.`,
+          plan,
+          quota,
+          limits,
+        });
+        return;
+      }
+      quota.puzzlesUsed += 1;
+    }
+
+    user.plan = plan;
+    user.quota = quota;
+    saveStore(store);
+    res.json({ plan, quota, limits });
   });
 
   // ==================== DYNAMIC PUZZLE FILTERING API ====================

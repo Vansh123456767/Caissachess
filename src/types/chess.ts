@@ -210,11 +210,45 @@ export interface TournamentPlayer {
   isUser?: boolean;
 }
 
+export type PlanTier = 'free' | 'pro' | 'max';
+
+export type PaymentMethod = 'upi' | 'netbanking' | 'card';
+
+export interface DailyQuotaUsage {
+  date: string;
+  analysisUsed: number;
+  puzzlesUsed: number;
+}
+
+export interface PaymentOrderInfo {
+  orderId: string;
+  orderToken: string;
+  plan: Exclude<PlanTier, 'free'>;
+  amountInr: number;
+  currency: 'INR';
+  provider: 'stripe' | 'razorpay' | 'sandbox';
+  checkoutUrl?: string;
+}
+
+export interface PaymentReceipt {
+  receiptId: string;
+  orderId: string;
+  plan: Exclude<PlanTier, 'free'>;
+  amountInr: number;
+  currency: 'INR';
+  method: PaymentMethod;
+  methodLabel: string;
+  status: 'paid';
+  paidAt: string;
+}
+
 export interface AuthUser {
   id: string;
   username: string;
   rating: number;
   createdAt: string;
+  plan?: PlanTier;
+  quota?: DailyQuotaUsage;
 }
 
 export interface Tournament {
