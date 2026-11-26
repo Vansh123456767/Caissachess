@@ -19,6 +19,7 @@ import {
   type DailyQuotaUsage,
   type PlanTier,
 } from './src/data/plans.ts';
+import { isBotAccount } from './src/utils/botFilter.ts';
 
 dotenv.config();
 
@@ -349,7 +350,8 @@ function checkAuthRateLimit(req: Request, res: Response): boolean {
 }
 
 function formatTournamentForClient(t: StoredTournament, userId?: string) {
-  const joined = userId ? t.players.some((p) => p.userId === userId) : false;
+  const humanPlayers = t.players.filter((p) => !isBotAccount(p));
+  const joined = userId ? humanPlayers.some((p) => p.userId === userId) : false;
   return {
     id: t.id,
     name: t.name,
@@ -363,7 +365,7 @@ function formatTournamentForClient(t: StoredTournament, userId?: string) {
     joined,
     ownerId: t.ownerId,
     createdBy: t.createdBy,
-    players: t.players.map((p) => ({
+    players: humanPlayers.map((p) => ({
       id: p.id,
       name: p.name,
       rating: p.rating,
@@ -812,6 +814,10 @@ async function startServer() {
 
   app.post('/api/tournaments/:id/join', requireAuth, (req: AuthedRequest, res: Response) => {
     const user = req.authUser!;
+    if (isBotAccount({ username: user.username })) {
+      res.status(403).json({ error: 'Bots are not allowed in tournament leaderboards.' });
+      return;
+    }
     const tournament = store.tournaments.find((t) => t.id === req.params.id);
     if (!tournament) {
       res.status(404).json({ error: 'Tournament not found.' });
@@ -839,6 +845,10 @@ async function startServer() {
 
   app.post('/api/tournaments/:id/result', requireAuth, (req: AuthedRequest, res: Response) => {
     const user = req.authUser!;
+    if (isBotAccount({ username: user.username })) {
+      res.status(403).json({ error: 'Bots are not allowed in tournament leaderboards.' });
+      return;
+    }
     const tournament = store.tournaments.find((t) => t.id === req.params.id);
     if (!tournament) {
       res.status(404).json({ error: 'Tournament not found.' });

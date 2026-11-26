@@ -42,12 +42,15 @@ import {
 } from '../engine/chessEngine';
 import { findBestMove, probeTablebase } from '../engine/aiSearch';
 import { ChessBoard } from './ChessBoard';
+import { CoordinatesTrainer } from './CoordinatesTrainer';
+import { PracticeTrainer } from './PracticeTrainer';
 import {
   DailyLeaderboard,
   DailyLeaderboardEntry,
   loadLeaderboard,
   saveLeaderboard,
 } from './DailyLeaderboard';
+import { isBotAccount } from '../utils/botFilter';
 import { soundFX } from '../utils/sound';
 import {
   AlertTriangle,
@@ -58,10 +61,13 @@ import {
   ChevronRight,
   Clock,
   Crown,
+  Eye,
   Flame,
   GraduationCap,
   HelpCircle,
+  Layers,
   Lightbulb,
+  Microscope,
   Play,
   RotateCcw,
   Shuffle,
@@ -77,6 +83,7 @@ interface PuzzlesViewProps {
   dailyUsage: DailyQuotaUsage;
   onConsumePuzzleQuota: () => Promise<{ allowed: boolean; error?: string }>;
   onOpenPlans: () => void;
+  onOpenInAnalysis?: (fen: string) => void;
 }
 
 type PuzzleSubTab =
@@ -86,8 +93,20 @@ type PuzzleSubTab =
   | 'streak'
   | 'storm'
   | 'racer'
+  | 'practice'
   | 'endgame'
-  | 'lessons';
+  | 'coordinates'
+  | 'lessons'
+  | 'dashboard';
+
+interface PuzzleHistoryEntry {
+  id: string;
+  title: string;
+  rating: number;
+  themes: string[];
+  solved: boolean;
+  date: string;
+}
 
 interface BlitzPreset {
   id: string;
@@ -174,6 +193,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
   dailyUsage,
   onConsumePuzzleQuota,
   onOpenPlans,
+  onOpenInAnalysis,
 }) => {
   const [subTab, setSubTab] = useState<PuzzleSubTab>('daily');
   const [sourceFilter, setSourceFilter] = useState<'all' | 'user'>('all');
@@ -226,31 +246,39 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
     return count;
   }, [solvedDailyDates]);
 
-  // Daily Leaderboard state (persisted in localStorage)
+  const isUserBot = isBotAccount({ name: prefs.username, isBot: prefs.isBot });
+
+  // Daily Leaderboard state (persisted in localStorage; bots excluded)
   const [leaderboard, setLeaderboard] = useState<DailyLeaderboardEntry[]>(() =>
-    loadLeaderboard(todayKey, prefs.username)
+    loadLeaderboard(todayKey, prefs.username, isUserBot)
   );
 
   useEffect(() => {
     setLeaderboard((prev) => {
+      if (isUserBot) {
+        return prev.filter(
+          (e) => !isBotAccount(e) && e.name.toLowerCase() !== prefs.username.toLowerCase()
+        );
+      }
       const hasUser = prev.some(
         (e) => e.name.toLowerCase() === prefs.username.toLowerCase()
       );
-      if (hasUser) return prev;
-      return loadLeaderboard(todayKey, prefs.username);
+      if (hasUser) return prev.filter((e) => !isBotAccount(e));
+      return loadLeaderboard(todayKey, prefs.username, false);
     });
-  }, [prefs.username, todayKey]);
+  }, [prefs.username, isUserBot, todayKey]);
 
   useEffect(() => {
     saveLeaderboard(leaderboard);
   }, [leaderboard]);
 
   const recordLeaderboardSolve = () => {
+    if (isUserBot) return;
     setLeaderboard((prev) => {
       const exists = prev.some(
         (e) => e.name.toLowerCase() === prefs.username.toLowerCase()
       );
-      const base = exists ? prev : loadLeaderboard(todayKey, prefs.username);
+      const base = exists ? prev : loadLeaderboard(todayKey, prefs.username, false);
       return base.map((entry) => {
         if (entry.name.toLowerCase() !== prefs.username.toLowerCase()) return entry;
         const resetDay = entry.lastUpdatedDate !== todayKey;
@@ -269,6 +297,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
   };
 
   const recordLeaderboardMiss = () => {
+    if (isUserBot) return;
     setLeaderboard((prev) =>
       prev.map((entry) =>
         entry.name.toLowerCase() === prefs.username.toLowerCase()
@@ -295,9 +324,18 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
     );
   };
 
-  // Difficulty Filter & Complexity Sort state (fetches dynamically from /api/puzzles)
+  // Difficulty Filter, Theme Filter & Complexity Sort state (fetches dynamically from /api/puzzles)
   const [difficultyFilter, setDifficultyFilter] = useState<PuzzleDifficulty>('all');
+  const [themeFilter, setThemeFilter] = useState<string>('all');
   const [sortOrder, setSortOrder] = useState<PuzzleSortOrder>('rating-asc');
+  const [puzzleAttemptHistory, setPuzzleAttemptHistory] = useState<PuzzleHistoryEntry[]>(() => {
+    try {
+      const raw = localStorage.getItem('caissa_puzzle_history_v1');
+      return raw ? JSON.parse(raw) : [];
+    } catch {
+      return [];
+    }
+  });
   const [fetchedCuratedPuzzles, setFetchedCuratedPuzzles] = useState<Puzzle[]>(() =>
     [...CURATED_PUZZLES].sort((a, b) => a.rating - b.rating)
   );
@@ -308,6 +346,22 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
     hard: CURATED_PUZZLES.filter((p) => getPuzzleDifficulty(p.rating) === 'hard').length,
   }));
   const [puzzlesLoading, setPuzzlesLoading] = useState(false);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('caissa_puzzle_history_v1', JSON.stringify(puzzleAttemptHistory));
+    } catch {
+      // ignore
+    }
+  }, [puzzleAttemptHistory]);
+
+  const availableThemes = useMemo(() => {
+    const set = new Set<string>();
+    [...CURATED_PUZZLES, ...userGamePuzzles].forEach((p) =>
+      p.themes.forEach((th) => set.add(th))
+    );
+    return Array.from(set).sort();
+  }, [userGamePuzzles]);
 
   useEffect(() => {
     let cancelled = false;
@@ -361,12 +415,17 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
         ? userGamePuzzles
         : userGamePuzzles.filter((p) => getPuzzleDifficulty(p.rating) === difficultyFilter);
 
-    const base =
+    let base =
       sourceFilter === 'user' && filteredUser.length > 0
         ? [...filteredUser]
         : sourceFilter === 'user'
         ? [...fetchedCuratedPuzzles]
         : [...filteredUser, ...fetchedCuratedPuzzles];
+
+    if (themeFilter !== 'all') {
+      const themed = base.filter((p) => p.themes.includes(themeFilter));
+      if (themed.length > 0) base = themed;
+    }
 
     if (sortOrder === 'rating-asc') {
       return [...base].sort((a, b) => a.rating - b.rating);
@@ -375,7 +434,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
       return [...base].sort((a, b) => b.rating - a.rating);
     }
     return base;
-  }, [sourceFilter, userGamePuzzles, fetchedCuratedPuzzles, difficultyFilter, sortOrder]);
+  }, [sourceFilter, userGamePuzzles, fetchedCuratedPuzzles, difficultyFilter, themeFilter, sortOrder]);
 
   // Shared Puzzle Runner State
   const [puzzleIdx, setPuzzleIdx] = useState(0);
@@ -456,11 +515,40 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
     return sorted[puzzleIdx % sorted.length] || CURATED_PUZZLES[0];
   }, [allPuzzles, puzzleIdx, subTab, dailySelection]);
 
+  const [solutionVisible, setSolutionVisible] = useState(false);
+  const [themesDirectoryOpen, setThemesDirectoryOpen] = useState(false);
+
+  const themeDirectoryCounts = useMemo(() => {
+    const map = new Map<string, number>();
+    [...CURATED_PUZZLES, ...userGamePuzzles].forEach((p) =>
+      p.themes.forEach((th) => map.set(th, (map.get(th) || 0) + 1))
+    );
+    return Array.from(map.entries()).sort((a, b) => b[1] - a[1]);
+  }, [userGamePuzzles]);
+
+  const solutionSanLine = useMemo(() => {
+    const sans: string[] = [];
+    try {
+      let st = parseFen(activePuzzle.fen, 'standard');
+      for (const uci of activePuzzle.solutionUci) {
+        const mv = uciToMove(st, uci);
+        if (!mv) break;
+        const r = makeMove(st, mv);
+        sans.push(r.san);
+        st = r.next;
+      }
+    } catch {
+      // ignore
+    }
+    return sans;
+  }, [activePuzzle]);
+
   // Reset board when puzzle or tab changes
   const loadPuzzleAt = (idx: number, pool?: Puzzle[]) => {
     puzzleRoundCountedRef.current = false;
     puzzleStartAtRef.current = Date.now();
     setSolveElapsedMs(0);
+    setSolutionVisible(false);
 
     if (subTab === 'daily') {
       setStepIdx(0);
@@ -615,6 +703,17 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
       soundFX.error();
       setFeedback('wrong');
       recordLeaderboardMiss();
+      setPuzzleAttemptHistory((prev) => [
+        {
+          id: activePuzzle.id,
+          title: activePuzzle.title,
+          rating: activePuzzle.rating,
+          themes: activePuzzle.themes,
+          solved: false,
+          date: todayKey,
+        },
+        ...prev.slice(0, 79),
+      ]);
 
       if (subTab === 'streak') {
         setStreakEnded(true);
@@ -659,6 +758,17 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
       setStepIdx(nextStep);
       setFeedback('solved');
       recordLeaderboardSolve();
+      setPuzzleAttemptHistory((prev) => [
+        {
+          id: activePuzzle.id,
+          title: activePuzzle.title,
+          rating: activePuzzle.rating,
+          themes: activePuzzle.themes,
+          solved: true,
+          date: todayKey,
+        },
+        ...prev.slice(0, 79),
+      ]);
 
       if (!solvedPuzzleIds.includes(activePuzzle.id)) {
         const nextSolvedIds = [...solvedPuzzleIds, activePuzzle.id];
@@ -1007,8 +1117,11 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
             ['streak', 'Puzzle Streak'],
             ['storm', 'Puzzle Storm'],
             ['racer', 'Puzzle Racer'],
+            ['practice', 'Practice'],
             ['endgame', 'Endgame Trainer'],
+            ['coordinates', 'Coordinates'],
             ['lessons', 'Chess Basics Lessons'],
+            ['dashboard', 'Puzzle Dashboard'],
           ] as [PuzzleSubTab, string][]).map(([id, label]) => (
             <button
               key={id}
@@ -1085,8 +1198,126 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
         </div>
       )}
 
-      {/* ==================== ENDGAME TRAINER WORKSPACE ==================== */}
-      {subTab === 'endgame' ? (
+      {/* ==================== PRACTICE / COORDINATES / DASHBOARD ==================== */}
+      {subTab === 'dashboard' ? (
+        (() => {
+          const totalAttempts = puzzleAttemptHistory.length;
+          const totalSolved = puzzleAttemptHistory.filter((h) => h.solved).length;
+          const accPct = totalAttempts > 0 ? Math.round((totalSolved / totalAttempts) * 100) : 0;
+          const themeMap = new Map<string, { solved: number; total: number }>();
+          for (const h of puzzleAttemptHistory) {
+            for (const th of h.themes) {
+              const e = themeMap.get(th) || { solved: 0, total: 0 };
+              e.total += 1;
+              if (h.solved) e.solved += 1;
+              themeMap.set(th, e);
+            }
+          }
+          const themeStats = Array.from(themeMap.entries()).sort((a, b) => b[1].total - a[1].total);
+          return (
+            <div className="space-y-6">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+                <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-4">
+                  <div className="text-xs text-stone-500 dark:text-zinc-400">Puzzle Rating</div>
+                  <div className="text-2xl font-mono font-bold tabular-nums text-emerald-600 dark:text-emerald-400 mt-1">
+                    {puzzleRating}
+                  </div>
+                </div>
+                <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-4">
+                  <div className="text-xs text-stone-500 dark:text-zinc-400">Overall Accuracy</div>
+                  <div className="text-2xl font-mono font-bold tabular-nums text-stone-900 dark:text-zinc-100 mt-1">
+                    {accPct}%
+                  </div>
+                  <div className="text-xs text-stone-500 dark:text-zinc-400 font-mono">
+                    {totalSolved}/{totalAttempts} solved
+                  </div>
+                </div>
+                <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-4">
+                  <div className="text-xs text-stone-500 dark:text-zinc-400">Best Puzzle Streak</div>
+                  <div className="text-2xl font-mono font-bold tabular-nums text-stone-900 dark:text-zinc-100 mt-1">
+                    {bestStreak}
+                  </div>
+                </div>
+                <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-4">
+                  <div className="text-xs text-stone-500 dark:text-zinc-400">Unique Puzzles Cleared</div>
+                  <div className="text-2xl font-mono font-bold tabular-nums text-stone-900 dark:text-zinc-100 mt-1">
+                    {solvedPuzzleIds.length}
+                  </div>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-5 space-y-3">
+                  <h2 className="text-base font-semibold text-stone-900 dark:text-zinc-100">
+                    Accuracy by Tactical Theme
+                  </h2>
+                  {themeStats.length === 0 ? (
+                    <p className="text-xs text-stone-500 dark:text-zinc-400 py-4">
+                      Solve puzzles in Tactics, Daily, Streak, or Blitz to see your theme radar.
+                    </p>
+                  ) : (
+                    <div className="space-y-2.5 max-h-72 overflow-y-auto thin-scroll">
+                      {themeStats.map(([theme, st]) => {
+                        const pct = Math.round((st.solved / st.total) * 100);
+                        return (
+                          <div key={theme} className="space-y-1">
+                            <div className="flex justify-between text-xs">
+                              <span className="font-medium text-stone-800 dark:text-zinc-200">{theme}</span>
+                              <span className="font-mono tabular-nums text-stone-500 dark:text-zinc-400">
+                                {pct}% ({st.solved}/{st.total})
+                              </span>
+                            </div>
+                            <div className="h-2 rounded bg-stone-100 dark:bg-zinc-800 overflow-hidden">
+                              <div className="h-full bg-emerald-600" style={{ width: `${pct}%` }} />
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-5 space-y-3">
+                  <h2 className="text-base font-semibold text-stone-900 dark:text-zinc-100">
+                    Recent Puzzle History
+                  </h2>
+                  {puzzleAttemptHistory.length === 0 ? (
+                    <p className="text-xs text-stone-500 dark:text-zinc-400 py-4">
+                      No attempts logged yet.
+                    </p>
+                  ) : (
+                    <div className="divide-y divide-stone-100 dark:divide-zinc-800 max-h-72 overflow-y-auto thin-scroll">
+                      {puzzleAttemptHistory.slice(0, 15).map((h, i) => (
+                        <div key={`${h.id}-${i}`} className="py-2 flex items-center justify-between gap-2 text-xs">
+                          <div className="min-w-0">
+                            <div className="font-medium text-stone-900 dark:text-zinc-100 truncate">
+                              {h.title}
+                            </div>
+                            <div className="text-[11px] font-mono text-stone-500 dark:text-zinc-400">
+                              {h.rating} · {h.themes.slice(0, 2).join(', ')}
+                            </div>
+                          </div>
+                          <span
+                            className={`font-semibold shrink-0 ${
+                              h.solved ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'
+                            }`}
+                          >
+                            {h.solved ? 'Solved' : 'Missed'}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })()
+      ) : subTab === 'practice' ? (
+        <PracticeTrainer prefs={prefs} />
+      ) : subTab === 'coordinates' ? (
+        <CoordinatesTrainer prefs={prefs} />
+      ) : subTab === 'endgame' ? (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
           <div className="lg:col-span-7 flex flex-col items-center gap-3">
             <div className="w-full max-w-[540px] flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 rounded-lg bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800">
@@ -1599,24 +1830,51 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
                     </div>
                   )}
 
+                  {solutionVisible && solutionSanLine.length > 0 && (
+                    <div className="p-3 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 text-xs space-y-1">
+                      <div className="font-semibold text-stone-700 dark:text-zinc-300">Solution Line</div>
+                      <div className="font-mono text-emerald-700 dark:text-emerald-400">
+                        {solutionSanLine.join(' · ')}
+                      </div>
+                    </div>
+                  )}
+
                   <div className="flex flex-wrap gap-2">
                     <button
                       type="button"
                       onClick={() => setDailyHintStep((h) => !h)}
                       disabled={feedback === 'solved'}
-                      className="px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-medium flex items-center gap-1.5 disabled:opacity-40"
+                      className="px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-medium flex items-center gap-1.5 disabled:opacity-40 whitespace-nowrap shrink-0"
                     >
                       <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
                       {dailyHintStep ? 'Hide Hint' : 'Hint'}
                     </button>
                     <button
                       type="button"
+                      onClick={() => setSolutionVisible((v) => !v)}
+                      className="px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                    >
+                      <Eye className="w-3.5 h-3.5" />
+                      {solutionVisible ? 'Hide Solution' : 'Solution'}
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => loadPuzzleAt(0)}
-                      className="px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-medium flex items-center gap-1.5"
+                      className="px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0"
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
-                      Reset Board
+                      Reset
                     </button>
+                    {onOpenInAnalysis && (
+                      <button
+                        type="button"
+                        onClick={() => onOpenInAnalysis(boardFen)}
+                        className="px-3 py-2 rounded-lg bg-stone-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                      >
+                        <Microscope className="w-3.5 h-3.5" />
+                        Analyze
+                      </button>
+                    )}
                   </div>
                 </div>
               );
@@ -1687,18 +1945,81 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
                   <div className="flex items-center justify-between gap-2 pt-1">
                     <span className="text-xs text-stone-600 dark:text-zinc-400 flex items-center gap-1">
                       <ArrowUpDown className="w-3.5 h-3.5" />
-                      Complexity Sort
+                      Theme & Sort
                     </span>
-                    <select
-                      value={sortOrder}
-                      onChange={(e) => setSortOrder(e.target.value as PuzzleSortOrder)}
-                      className="px-2.5 py-1 rounded-md border border-stone-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs font-medium text-stone-800 dark:text-zinc-200"
-                    >
-                      <option value="rating-asc">Rating: Low to High</option>
-                      <option value="rating-desc">Rating: High to Low</option>
-                      <option value="default">Curated Order</option>
-                    </select>
+                    <div className="flex items-center gap-1.5">
+                      <select
+                        value={themeFilter}
+                        onChange={(e) => {
+                          setThemeFilter(e.target.value);
+                          setPuzzleIdx(0);
+                        }}
+                        className="px-2 py-1 rounded-md border border-stone-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs font-medium text-stone-800 dark:text-zinc-200 max-w-[130px]"
+                      >
+                        <option value="all">All Themes</option>
+                        {availableThemes.map((th) => (
+                          <option key={th} value={th}>
+                            {th}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        value={sortOrder}
+                        onChange={(e) => setSortOrder(e.target.value as PuzzleSortOrder)}
+                        className="px-2.5 py-1 rounded-md border border-stone-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs font-medium text-stone-800 dark:text-zinc-200"
+                      >
+                        <option value="rating-asc">Rating: Low to High</option>
+                        <option value="rating-desc">Rating: High to Low</option>
+                        <option value="default">Curated Order</option>
+                      </select>
+                    </div>
                   </div>
+                  <div className="flex items-center justify-between pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setThemesDirectoryOpen((v) => !v)}
+                      className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 hover:underline flex items-center gap-1"
+                    >
+                      <Layers className="w-3 h-3" />
+                      {themesDirectoryOpen ? 'Hide Themes Directory' : 'Browse Themes Directory'}
+                    </button>
+                    {themeFilter !== 'all' && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setThemeFilter('all');
+                          setPuzzleIdx(0);
+                        }}
+                        className="text-[11px] text-stone-500 hover:underline"
+                      >
+                        Clear theme ({themeFilter})
+                      </button>
+                    )}
+                  </div>
+
+                  {themesDirectoryOpen && (
+                    <div className="pt-2 border-t border-stone-200 dark:border-zinc-800 grid grid-cols-2 gap-1.5 max-h-40 overflow-y-auto thin-scroll">
+                      {themeDirectoryCounts.map(([th, count]) => (
+                        <button
+                          key={th}
+                          type="button"
+                          onClick={() => {
+                            setThemeFilter(th);
+                            setPuzzleIdx(0);
+                            setThemesDirectoryOpen(false);
+                          }}
+                          className={`px-2 py-1 rounded border text-left text-[11px] flex items-center justify-between ${
+                            themeFilter === th
+                              ? 'border-emerald-600 bg-emerald-600 text-white'
+                              : 'border-stone-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-stone-700 dark:text-zinc-300 hover:bg-stone-100 dark:hover:bg-zinc-800'
+                          }`}
+                        >
+                          <span className="truncate">{th}</span>
+                          <span className="font-mono opacity-80 ml-1">{count}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
 
                 {sourceFilter === 'user' && userGamePuzzles.length === 0 && (
@@ -1725,8 +2046,16 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
                     Incorrect move. Keep looking for the tactical refutation!
                   </div>
                 )}
+                {solutionVisible && solutionSanLine.length > 0 && (
+                  <div className="p-3 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 text-xs space-y-1">
+                    <div className="font-semibold text-stone-700 dark:text-zinc-300">Solution Line</div>
+                    <div className="font-mono text-emerald-700 dark:text-emerald-400">
+                      {solutionSanLine.join(' · ')}
+                    </div>
+                  </div>
+                )}
 
-                <div className="flex gap-2">
+                <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
                     onClick={() =>
@@ -1744,6 +2073,25 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
                   >
                     Retry
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setSolutionVisible((v) => !v)}
+                    className="px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-medium flex items-center gap-1 whitespace-nowrap shrink-0"
+                  >
+                    <Eye className="w-3.5 h-3.5" />
+                    {solutionVisible ? 'Hide' : 'Solution'}
+                  </button>
+                  {onOpenInAnalysis && (
+                    <button
+                      type="button"
+                      onClick={() => onOpenInAnalysis(boardFen)}
+                      className="px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-medium flex items-center gap-1 whitespace-nowrap shrink-0"
+                      title="Open position in Analysis Board"
+                    >
+                      <Microscope className="w-3.5 h-3.5" />
+                      Analyze
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => loadPuzzleAt(puzzleIdx + 1)}
@@ -1937,17 +2285,29 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
                     <p className="text-xs text-red-600 dark:text-red-400 font-medium text-center">
                       Streak ended at {streakCount}! One mistake resets the streak.
                     </p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setStreakCount(0);
-                        setStreakEnded(false);
-                        loadPuzzleAt(0);
-                      }}
-                      className="w-full py-2.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold"
-                    >
-                      Start New Streak
-                    </button>
+                    <div className="flex gap-2">
+                      {onOpenInAnalysis && (
+                        <button
+                          type="button"
+                          onClick={() => onOpenInAnalysis(boardFen)}
+                          className="px-3 py-2.5 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                        >
+                          <Microscope className="w-3.5 h-3.5" />
+                          Analyze
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setStreakCount(0);
+                          setStreakEnded(false);
+                          loadPuzzleAt(0);
+                        }}
+                        className="flex-1 py-2.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold"
+                      >
+                        Start New Streak
+                      </button>
+                    </div>
                   </div>
                 ) : (
                   <p className="text-xs text-stone-600 dark:text-zinc-400">
@@ -2063,6 +2423,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
             <DailyLeaderboard
               entries={leaderboard}
               currentUsername={prefs.username}
+              isCurrentUserBot={isUserBot}
               dateKey={todayKey}
               onResetUserStats={resetUserLeaderboardStats}
             />

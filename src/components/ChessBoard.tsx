@@ -1,9 +1,10 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BoardAnnotation,
   BoardState,
   BoardThemeId,
   Move,
+  MoveMethodId,
   PieceColor,
   PieceSetId,
   PieceType,
@@ -14,6 +15,7 @@ import {
   findKing,
   getLegalMoves,
   isInCheck,
+  moveToSan,
   RANKS,
   sqToCoord,
 } from '../engine/chessEngine';
@@ -73,6 +75,11 @@ export const BOARD_THEMES: Record<
   },
 };
 
+export interface QueuedPremove {
+  from: [number, number];
+  to: [number, number];
+}
+
 interface ChessBoardProps {
   state: BoardState;
   onMove?: (move: Move) => void;
@@ -83,6 +90,16 @@ interface ChessBoardProps {
   pieceSet?: PieceSetId;
   showCoordinates?: boolean;
   highlightLegal?: boolean;
+  showLastMove?: boolean;
+  pieceScale?: 'normal' | 'large';
+  autoQueen?: boolean;
+  confirmMove?: boolean;
+  moveMethod?: MoveMethodId;
+  blindfold?: boolean;
+  premove?: QueuedPremove | null;
+  onPremoveSet?: (next: QueuedPremove | null) => void;
+  premoveQueue?: QueuedPremove[];
+  onPremoveQueueChange?: (next: QueuedPremove[]) => void;
   lastMove?: { from?: [number, number] | null; to: [number, number] } | null;
   targetSquares?: string[]; // For lessons
   suggestedArrows?: { from: string; to: string; color?: string }[];
@@ -102,6 +119,16 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   pieceSet = 'classic',
   showCoordinates = true,
   highlightLegal = true,
+  showLastMove = true,
+  pieceScale = 'normal',
+  autoQueen = false,
+  confirmMove = false,
+  moveMethod = 'both',
+  blindfold = false,
+  premove = null,
+  onPremoveSet,
+  premoveQueue,
+  onPremoveQueueChange,
   lastMove = null,
   targetSquares = [],
   suggestedArrows = [],
@@ -112,11 +139,18 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
 }) => {
   const [selectedSq, setSelectedSq] = useState<[number, number] | null>(null);
   const [selectedDrop, setSelectedDrop] = useState<Exclude<PieceType, 'k'> | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<{ move: Move; san: string } | null>(null);
   const [pendingPromo, setPendingPromo] = useState<{
     from: [number, number];
     to: [number, number];
     candidates: Move[];
   } | null>(null);
+
+  useEffect(() => {
+    setSelectedSq(null);
+    setSelectedDrop(null);
+    setPendingConfirm(null);
+  }, [state.turn, state.fullmoveNumber]);
 
   const rightClickStart = useRef<string | null>(null);
   const theme = BOARD_THEMES[boardTheme] || BOARD_THEMES.wood;
@@ -142,12 +176,50 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
     );
   }, [legalMoves, selectedSq, selectedDrop]);
 
+  const canPremoveNow =
+    interactive &&
+    allowedColor !== 'both' &&
+    state.turn !== allowedColor &&
+    (!!onPremoveSet || !!onPremoveQueueChange);
+
+  const effectivePremoveQueue = useMemo(() => {
+    if (premoveQueue) return premoveQueue;
+    return premove ? [premove] : [];
+  }, [premoveQueue, premove]);
+
+  const queuePremove = (item: QueuedPremove) => {
+    if (onPremoveQueueChange) {
+      onPremoveQueueChange([...effectivePremoveQueue.slice(-4), item]);
+    } else {
+      onPremoveSet?.(item);
+    }
+  };
+
+  const clearPremoves = () => {
+    if (onPremoveQueueChange) onPremoveQueueChange([]);
+    onPremoveSet?.(null);
+  };
+
+  const dispatchOrConfirmMove = (mv: Move) => {
+    setSelectedSq(null);
+    setSelectedDrop(null);
+    if (confirmMove) {
+      const san = moveToSan(state, mv, legalMoves);
+      setPendingConfirm({ move: mv, san });
+    } else {
+      onMove?.(mv);
+    }
+  };
+
   const tryExecuteMoves = (matching: Move[], from?: [number, number], to?: [number, number]) => {
     if (matching.length === 0) return false;
     if (matching.length === 1) {
-      setSelectedSq(null);
-      setSelectedDrop(null);
-      onMove?.(matching[0]);
+      dispatchOrConfirmMove(matching[0]);
+      return true;
+    }
+    if (autoQueen) {
+      const queenMove = matching.find((m) => m.promotion === 'q') || matching[0];
+      dispatchOrConfirmMove(queenMove);
       return true;
     }
     // Multiple moves to same target => promotion choices!
@@ -159,7 +231,34 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   };
 
   const handleSquareClick = (r: number, c: number) => {
-    if (!interactive || !onMove) return;
+    if (!interactive || moveMethod === 'drag') return;
+    if (pendingConfirm) return;
+
+    // Handle Premove Selection when waiting for opponent
+    if (canPremoveNow) {
+      const piece = state.board[r][c];
+      if (selectedSq) {
+        if (selectedSq[0] === r && selectedSq[1] === c) {
+          setSelectedSq(null);
+          clearPremoves();
+          return;
+        }
+        queuePremove({ from: selectedSq, to: [r, c] });
+        setSelectedSq(null);
+        return;
+      }
+      const queuedFromHere = effectivePremoveQueue.some(
+        (pq) => pq.to[0] === r && pq.to[1] === c
+      );
+      if ((piece && piece.color === allowedColor) || queuedFromHere) {
+        setSelectedSq([r, c]);
+      } else {
+        clearPremoves();
+      }
+      return;
+    }
+
+    if (!onMove) return;
     if (allowedColor !== 'both' && state.turn !== allowedColor) return;
 
     // 1. If a Crazyhouse drop piece is selected
@@ -198,15 +297,25 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   };
 
   const handleDragStart = (r: number, c: number, e: React.DragEvent) => {
-    if (!interactive) {
+    if (!interactive || moveMethod === 'click' || pendingConfirm) {
       e.preventDefault();
+      return;
+    }
+    const p = state.board[r][c];
+    if (canPremoveNow) {
+      if (!p || p.color !== allowedColor) {
+        e.preventDefault();
+        return;
+      }
+      setSelectedSq([r, c]);
+      setSelectedDrop(null);
+      e.dataTransfer.setData('text/plain', `${r},${c}`);
       return;
     }
     if (allowedColor !== 'both' && state.turn !== allowedColor) {
       e.preventDefault();
       return;
     }
-    const p = state.board[r][c];
     if (!p || p.color !== state.turn) {
       e.preventDefault();
       return;
@@ -218,8 +327,17 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
 
   const handleDropOnSquare = (r: number, c: number, e: React.DragEvent) => {
     e.preventDefault();
-    if (!interactive || !onMove) return;
+    if (!interactive || moveMethod === 'click' || pendingConfirm) return;
     const raw = e.dataTransfer.getData('text/plain');
+    if (canPremoveNow) {
+      const [fr, fc] = raw.split(',').map((n) => parseInt(n, 10));
+      if (!isNaN(fr) && !isNaN(fc) && (fr !== r || fc !== c)) {
+        queuePremove({ from: [fr, fc], to: [r, c] });
+      }
+      setSelectedSq(null);
+      return;
+    }
+    if (!onMove) return;
     if (raw.startsWith('drop:')) {
       const pt = raw.slice(5) as Exclude<PieceType, 'k'>;
       const matching = legalMoves.filter(
@@ -241,6 +359,11 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   };
 
   const handleMouseDownRight = (r: number, c: number, e: React.MouseEvent) => {
+    if (e.button === 2 && canPremoveNow && effectivePremoveQueue.length > 0) {
+      clearPremoves();
+      setSelectedSq(null);
+      return;
+    }
     if (!allowAnnotations || e.button !== 2) return;
     rightClickStart.current = coordToSq(r, c);
   };
@@ -252,18 +375,36 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
     rightClickStart.current = null;
     if (!startSq) return;
 
+    // Lichess 4-color brushes: Shift=Red, Alt=Blue, Shift+Alt=Yellow, Plain=Green
+    const brushArrow =
+      e.shiftKey && e.altKey
+        ? '#f59e0b'
+        : e.shiftKey
+        ? '#ef4444'
+        : e.altKey
+        ? '#3b82f6'
+        : '#10b981';
+    const brushSquare =
+      e.shiftKey && e.altKey
+        ? 'rgba(245, 158, 11, 0.52)'
+        : e.shiftKey
+        ? 'rgba(239, 68, 68, 0.52)'
+        : e.altKey
+        ? 'rgba(59, 130, 246, 0.52)'
+        : 'rgba(16, 185, 129, 0.52)';
+
     const current = annotations || { arrows: [], squares: [] };
     if (startSq === endSq) {
       const exists = current.squares.some((s) => s.square === endSq);
       const nextSquares = exists
         ? current.squares.filter((s) => s.square !== endSq)
-        : [...current.squares, { square: endSq, color: 'rgba(16, 185, 129, 0.55)' }];
+        : [...current.squares, { square: endSq, color: brushSquare }];
       onUpdateAnnotations({ ...current, squares: nextSquares });
     } else {
       const exists = current.arrows.some((a) => a.from === startSq && a.to === endSq);
       const nextArrows = exists
         ? current.arrows.filter((a) => !(a.from === startSq && a.to === endSq))
-        : [...current.arrows, { from: startSq, to: endSq, color: '#10b981' }];
+        : [...current.arrows, { from: startSq, to: endSq, color: brushArrow }];
       onUpdateAnnotations({ ...current, arrows: nextArrows });
     }
   };
@@ -347,7 +488,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
       <div
         className="relative w-full aspect-square rounded-lg overflow-hidden shadow-md border border-stone-300 dark:border-zinc-700"
         onContextMenu={(e) => {
-          if (allowAnnotations) e.preventDefault();
+          if (allowAnnotations || canPremoveNow) e.preventDefault();
         }}
       >
         <div className="grid grid-cols-8 grid-rows-8 w-full h-full">
@@ -357,7 +498,14 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
               const sq = coordToSq(r, c);
               const piece = state.board[r][c];
               const isSelected = selectedSq && selectedSq[0] === r && selectedSq[1] === c;
+              const premoveIdx = effectivePremoveQueue.findIndex(
+                (pq) =>
+                  (pq.from[0] === r && pq.from[1] === c) ||
+                  (pq.to[0] === r && pq.to[1] === c)
+              );
+              const isPremoveSq = premoveIdx >= 0;
               const isLast =
+                showLastMove &&
                 lastMove &&
                 ((lastMove.from && lastMove.from[0] === r && lastMove.from[1] === c) ||
                   (lastMove.to[0] === r && lastMove.to[1] === c));
@@ -388,6 +536,11 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                       className="absolute inset-0 pointer-events-none"
                       style={{ backgroundColor: theme.lastMove }}
                     />
+                  )}
+
+                  {/* Queued Premove tint */}
+                  {isPremoveSq && (
+                    <div className="absolute inset-0 bg-sky-500/40 pointer-events-none" />
                   )}
 
                   {/* Selected square tint */}
@@ -443,11 +596,18 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                   )}
 
                   {/* Piece */}
-                  {piece && (
+                  {piece && !blindfold && (
                     <div
-                      draggable={interactive && (allowedColor === 'both' || allowedColor === state.turn)}
+                      draggable={
+                        interactive &&
+                        moveMethod !== 'click' &&
+                        !pendingConfirm &&
+                        (allowedColor === 'both' || allowedColor === state.turn || canPremoveNow)
+                      }
                       onDragStart={(e) => handleDragStart(r, c, e)}
-                      className="relative z-10 w-[86%] h-[86%] transition-transform duration-100 active:scale-105"
+                      className={`relative z-10 transition-transform duration-100 active:scale-105 ${
+                        pieceScale === 'large' ? 'w-[94%] h-[94%]' : 'w-[86%] h-[86%]'
+                      }`}
                     >
                       <ChessPiece color={piece.color} type={piece.type} pieceSet={pieceSet} />
                     </div>
@@ -491,7 +651,27 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                 refY="2"
                 orient="auto"
               >
-                <polygon points="0 0, 4 2, 0 4" fill="#d97706" />
+                <polygon points="0 0, 4 2, 0 4" fill="#f59e0b" />
+              </marker>
+              <marker
+                id="arrowhead-red"
+                markerWidth="4"
+                markerHeight="4"
+                refX="2.5"
+                refY="2"
+                orient="auto"
+              >
+                <polygon points="0 0, 4 2, 0 4" fill="#ef4444" />
+              </marker>
+              <marker
+                id="arrowhead-blue"
+                markerWidth="4"
+                markerHeight="4"
+                refX="2.5"
+                refY="2"
+                orient="auto"
+              >
+                <polygon points="0 0, 4 2, 0 4" fill="#3b82f6" />
               </marker>
             </defs>
             {allArrows.map((arrow, i) => {
@@ -502,7 +682,9 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
               const len = Math.hypot(dx, dy) || 1;
               const endX = p2.x - (dx / len) * 2.2;
               const endY = p2.y - (dy / len) * 2.2;
-              const isAmber = arrow.color.includes('d977') || arrow.color.includes('amber');
+              const isAmber = arrow.color.includes('d977') || arrow.color.includes('f59e') || arrow.color.includes('amber');
+              const isRed = arrow.color.includes('dc26') || arrow.color.includes('ef44') || arrow.color.includes('red');
+              const isBlue = arrow.color.includes('3b82') || arrow.color.includes('blue');
               return (
                 <line
                   key={`${arrow.from}-${arrow.to}-${i}`}
@@ -514,7 +696,15 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                   strokeWidth="1.65"
                   strokeOpacity="0.82"
                   strokeLinecap="round"
-                  markerEnd={isAmber ? 'url(#arrowhead-amber)' : 'url(#arrowhead-emerald)'}
+                  markerEnd={
+                    isRed
+                      ? 'url(#arrowhead-red)'
+                      : isBlue
+                      ? 'url(#arrowhead-blue)'
+                      : isAmber
+                      ? 'url(#arrowhead-amber)'
+                      : 'url(#arrowhead-emerald)'
+                  }
                 />
               );
             })}
@@ -535,8 +725,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                     type="button"
                     onClick={() => {
                       setPendingPromo(null);
-                      setSelectedSq(null);
-                      onMove?.(cand);
+                      dispatchOrConfirmMove(cand);
                     }}
                     className="w-12 h-12 rounded-lg bg-stone-100 dark:bg-zinc-800 hover:bg-emerald-500/20 border border-stone-200 dark:border-zinc-700 flex items-center justify-center transition-colors"
                   >
@@ -560,6 +749,35 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
           </div>
         )}
       </div>
+
+      {/* Optional Move Confirmation Strip */}
+      {pendingConfirm && (
+        <div className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-xs">
+          <span className="font-medium text-amber-900 dark:text-amber-200">
+            Confirm move <strong className="font-mono">{pendingConfirm.san}</strong>?
+          </span>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => setPendingConfirm(null)}
+              className="px-2.5 py-1 rounded border border-stone-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-stone-700 dark:text-zinc-300 font-medium"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                const mv = pendingConfirm.move;
+                setPendingConfirm(null);
+                onMove?.(mv);
+              }}
+              className="px-3 py-1 rounded bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
+            >
+              Confirm
+            </button>
+          </div>
+        </div>
+      )}
 
       {renderPocket(flipped ? 'b' : 'w')}
     </div>

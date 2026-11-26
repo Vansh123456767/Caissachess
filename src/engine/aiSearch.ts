@@ -315,6 +315,24 @@ export interface EngineLine {
   pvUci: string[];
 }
 
+function quickBestFollowup(state: BoardState): Move | null {
+  const legal = orderMoves(getLegalMoves(state));
+  if (legal.length === 0) return null;
+  const maximizing = state.turn === 'w';
+  let bestMove = legal[0];
+  let bestScore = maximizing ? -Infinity : Infinity;
+
+  for (const m of legal.slice(0, 12)) {
+    const next = applyMoveRaw(state, m);
+    const val = alphaBeta(next, 1, -Infinity, Infinity, !maximizing, 1);
+    if (maximizing ? val > bestScore : val < bestScore) {
+      bestScore = val;
+      bestMove = m;
+    }
+  }
+  return bestMove;
+}
+
 export function analyzePositionMultiPv(state: BoardState, numLines = 3, depth = 3): EngineLine[] {
   const legal = orderMoves(getLegalMoves(state));
   if (legal.length === 0) return [];
@@ -333,14 +351,14 @@ export function analyzePositionMultiPv(state: BoardState, numLines = 3, depth = 
     const pvSan: string[] = [moveToSan(state, cand.move, legal)];
     const pvUci: string[] = [moveToUci(cand.move)];
 
-    // Extend PV 3 plies greedily
+    // Extend PV 3 plies quickly without redundant deep full searches
     let cur = cand.next;
     for (let step = 0; step < 3; step++) {
       const term = evaluateGameResult(cur);
       if (term) break;
-      const follow = findBestMove(cur, 6);
-      if (!follow.move) break;
-      const res = makeMove(cur, follow.move);
+      const followMove = quickBestFollowup(cur);
+      if (!followMove) break;
+      const res = makeMove(cur, followMove);
       pvSan.push(res.san);
       pvUci.push(res.uci);
       cur = res.next;
@@ -360,6 +378,21 @@ export function analyzePositionMultiPv(state: BoardState, numLines = 3, depth = 
       pvUci,
     };
   });
+}
+
+export function findThreatLine(state: BoardState, depth = 2): EngineLine | null {
+  if (evaluateGameResult(state)) return null;
+  if (isInCheck(state.board, state.turn, state.variant)) return null;
+  const oppTurn: PieceColor = state.turn === 'w' ? 'b' : 'w';
+  if (isInCheck(state.board, oppTurn, state.variant)) return null;
+
+  const oppState: BoardState = {
+    ...state,
+    turn: oppTurn,
+    enPassant: null,
+  };
+  const lines = analyzePositionMultiPv(oppState, 1, Math.min(2, depth));
+  return lines[0] || null;
 }
 
 export function formatEval(evalCp: number, mateIn?: number): string {
@@ -386,7 +419,8 @@ export function evalToWhitePercent(evalCp: number): number {
 export function analyzeGameMoves(
   fens: string[],
   moves: Move[],
-  variant: BoardState['variant']
+  variant: BoardState['variant'],
+  onProgress?: (done: number, total: number) => void
 ): {
   analyzed: AnalyzedMove[];
   accuracy: { w: number; b: number };
@@ -400,15 +434,24 @@ export function analyzeGameMoves(
   let bLossSum = 0;
   let bCount = 0;
 
-  for (let i = 0; i < moves.length && i < fens.length - 1; i++) {
+  const total = Math.min(moves.length, Math.max(0, fens.length - 1));
+  let cachedBeforeLine: EngineLine | undefined = undefined;
+  let cachedEvalBefore: number | undefined = undefined;
+
+  for (let i = 0; i < total; i++) {
     const stateBefore = parseFen(fens[i], variant);
     const mv = moves[i];
-    const best = analyzePositionMultiPv(stateBefore, 1, 2)[0];
-    const evalBefore = best ? best.evalCp : evaluatePosition(stateBefore);
+    const best = cachedBeforeLine ?? analyzePositionMultiPv(stateBefore, 1, 2)[0];
+    const evalBefore =
+      cachedEvalBefore ?? (best ? best.evalCp : evaluatePosition(stateBefore));
 
     const stateAfter = parseFen(fens[i + 1], variant);
     const afterBest = analyzePositionMultiPv(stateAfter, 1, 2)[0];
     const evalAfter = afterBest ? afterBest.evalCp : evaluatePosition(stateAfter);
+
+    // Reuse evalAfter and best line of stateAfter as evalBefore of ply i + 1
+    cachedBeforeLine = afterBest;
+    cachedEvalBefore = evalAfter;
 
     const mover = mv.color;
     const rawLoss = mover === 'w' ? evalBefore - evalAfter : evalAfter - evalBefore;
@@ -467,6 +510,8 @@ export function analyzeGameMoves(
         source: 'From Your Game',
       });
     }
+
+    onProgress?.(i + 1, total);
   }
 
   const wAcpl = wCount > 0 ? Math.round(wLossSum / wCount) : 0;

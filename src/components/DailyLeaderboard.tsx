@@ -1,9 +1,11 @@
 import React, { useMemo, useState } from 'react';
 import { Award, Flame, RotateCcw } from 'lucide-react';
+import { isBotAccount } from '../utils/botFilter';
 
 export interface DailyLeaderboardEntry {
   id: string;
   name: string;
+  isBot?: boolean;
   solvedToday: number;
   totalSolved: number;
   currentStreak: number;
@@ -63,22 +65,29 @@ export function buildSeedLeaderboard(dateKey: string): DailyLeaderboardEntry[] {
   ];
 }
 
-export function loadLeaderboard(dateKey: string, username: string): DailyLeaderboardEntry[] {
+export function loadLeaderboard(
+  dateKey: string,
+  username: string,
+  isCurrentUserBot = false
+): DailyLeaderboardEntry[] {
+  const userBlockedAsBot = isCurrentUserBot || isBotAccount({ name: username });
   try {
     const raw = localStorage.getItem(LEADERBOARD_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as DailyLeaderboardEntry[];
       if (Array.isArray(parsed) && parsed.length > 0) {
-        // Reset daily counters for entries from a previous calendar day
-        const normalized = parsed.map((entry) =>
-          entry.lastUpdatedDate === dateKey
-            ? entry
-            : { ...entry, solvedToday: 0, lastUpdatedDate: dateKey }
-        );
+        // Reset daily counters for previous day and strictly exclude bot entries
+        const normalized = parsed
+          .filter((entry) => !isBotAccount(entry))
+          .map((entry) =>
+            entry.lastUpdatedDate === dateKey
+              ? entry
+              : { ...entry, solvedToday: 0, lastUpdatedDate: dateKey }
+          );
         const hasUser = normalized.some(
           (e) => e.name.toLowerCase() === username.toLowerCase()
         );
-        if (!hasUser) {
+        if (!hasUser && !userBlockedAsBot) {
           normalized.push({
             id: `user-${username.toLowerCase()}`,
             name: username,
@@ -96,8 +105,11 @@ export function loadLeaderboard(dateKey: string, username: string): DailyLeaderb
     // ignore storage parse failures
   }
 
-  const seeded = buildSeedLeaderboard(dateKey);
-  if (!seeded.some((e) => e.name.toLowerCase() === username.toLowerCase())) {
+  const seeded = buildSeedLeaderboard(dateKey).filter((entry) => !isBotAccount(entry));
+  if (
+    !userBlockedAsBot &&
+    !seeded.some((e) => e.name.toLowerCase() === username.toLowerCase())
+  ) {
     seeded.push({
       id: `user-${username.toLowerCase()}`,
       name: username,
@@ -113,7 +125,8 @@ export function loadLeaderboard(dateKey: string, username: string): DailyLeaderb
 
 export function saveLeaderboard(entries: DailyLeaderboardEntry[]): void {
   try {
-    localStorage.setItem(LEADERBOARD_STORAGE_KEY, JSON.stringify(entries));
+    const clean = entries.filter((e) => !isBotAccount(e));
+    localStorage.setItem(LEADERBOARD_STORAGE_KEY, JSON.stringify(clean));
   } catch {
     // ignore quota errors
   }
@@ -122,6 +135,7 @@ export function saveLeaderboard(entries: DailyLeaderboardEntry[]): void {
 interface DailyLeaderboardProps {
   entries: DailyLeaderboardEntry[];
   currentUsername: string;
+  isCurrentUserBot?: boolean;
   dateKey: string;
   onResetUserStats: () => void;
 }
@@ -131,15 +145,16 @@ type SortMetric = 'solved' | 'streak';
 export const DailyLeaderboard: React.FC<DailyLeaderboardProps> = ({
   entries,
   currentUsername,
+  isCurrentUserBot = false,
   dateKey,
   onResetUserStats,
 }) => {
   const [sortBy, setSortBy] = useState<SortMetric>('solved');
 
   const rankedAll = useMemo(() => {
-    const normalized = entries.map((e) =>
-      e.lastUpdatedDate === dateKey ? e : { ...e, solvedToday: 0 }
-    );
+    const normalized = entries
+      .filter((e) => !isBotAccount(e))
+      .map((e) => (e.lastUpdatedDate === dateKey ? e : { ...e, solvedToday: 0 }));
     return normalized.sort((a, b) => {
       if (sortBy === 'streak') {
         return (
@@ -157,9 +172,9 @@ export const DailyLeaderboard: React.FC<DailyLeaderboardProps> = ({
   }, [entries, dateKey, sortBy]);
 
   const topFive = rankedAll.slice(0, 5);
-  const userRankIdx = rankedAll.findIndex(
-    (e) => e.name.toLowerCase() === currentUsername.toLowerCase()
-  );
+  const userRankIdx = isCurrentUserBot
+    ? -1
+    : rankedAll.findIndex((e) => e.name.toLowerCase() === currentUsername.toLowerCase());
   const userEntry = userRankIdx >= 0 ? rankedAll[userRankIdx] : null;
   const userInTopFive = userRankIdx >= 0 && userRankIdx < 5;
 
@@ -260,16 +275,24 @@ export const DailyLeaderboard: React.FC<DailyLeaderboardProps> = ({
         </div>
       )}
 
-      <div className="flex items-center justify-between pt-1 text-[11px] text-stone-500 dark:text-zinc-400">
-        <span>Saved locally for {dateKey}</span>
-        <button
-          type="button"
-          onClick={onResetUserStats}
-          className="inline-flex items-center gap-1 hover:text-stone-900 dark:hover:text-zinc-200 transition-colors"
-        >
-          <RotateCcw className="w-3 h-3" />
-          Reset My Stats
-        </button>
+      {isCurrentUserBot && (
+        <div className="px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50/80 dark:bg-amber-950/30 text-[11px] text-amber-800 dark:text-amber-200">
+          BOT accounts are excluded from Daily Leaderboards.
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-[11px] text-stone-500 dark:text-zinc-400">
+        <span>Human players only · Bots excluded · {dateKey}</span>
+        {!isCurrentUserBot && (
+          <button
+            type="button"
+            onClick={onResetUserStats}
+            className="inline-flex items-center gap-1 hover:text-stone-900 dark:hover:text-zinc-200 transition-colors"
+          >
+            <RotateCcw className="w-3 h-3" />
+            Reset My Stats
+          </button>
+        )}
       </div>
     </div>
   );

@@ -16,6 +16,7 @@ import {
   toFen,
 } from '../engine/chessEngine';
 import { ChessBoard } from './ChessBoard';
+import { soundFX } from '../utils/sound';
 import {
   BarChart3,
   BookMarked,
@@ -24,10 +25,14 @@ import {
   ChevronRight,
   Copy,
   Download,
+  GraduationCap,
+  Lightbulb,
   Microscope,
   Plus,
+  RotateCcw,
   Share2,
   Trash2,
+  Upload,
 } from 'lucide-react';
 
 interface StudiesViewProps {
@@ -109,6 +114,13 @@ export const StudiesView: React.FC<StudiesViewProps> = ({
   const [ply, setPly] = useState(0);
   const [newStudyTitle, setNewStudyTitle] = useState('');
   const [copiedShare, setCopiedShare] = useState(false);
+  const [lessonMode, setLessonMode] = useState(false);
+  const [lessonHint, setLessonHint] = useState(false);
+  const [lessonFeedback, setLessonFeedback] = useState<string | null>(null);
+  const [lessonCorrect, setLessonCorrect] = useState(0);
+  const [lessonAttempts, setLessonAttempts] = useState(0);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importPgnText, setImportPgnText] = useState('');
 
   useEffect(() => {
     if (activeStudy && !activeStudy.chapters.some((c) => c.id === activeChapterId)) {
@@ -141,6 +153,27 @@ export const StudiesView: React.FC<StudiesViewProps> = ({
   const handleStudyMove = (mv: Move) => {
     if (!activeChapter) return;
     const res = makeMove(currentState, mv);
+    if (lessonMode && ply < activeChapter.moves.length) {
+      const expected = activeChapter.moves[ply];
+      setLessonAttempts((a) => a + 1);
+      if (res.uci === expected.uci || res.san === expected.san) {
+        soundFX.move();
+        setLessonCorrect((c) => c + 1);
+        setLessonHint(false);
+        const nextPly = ply + 1;
+        setPly(nextPly);
+        setLessonFeedback(
+          nextPly >= activeChapter.moves.length
+            ? 'Chapter complete! Every move mastered.'
+            : `Correct: ${expected.san}! Keep going.`
+        );
+      } else {
+        soundFX.error();
+        setLessonFeedback(`Try again — "${res.san}" deviates from the study line.`);
+      }
+      return;
+    }
+
     const committed: Move = { ...mv, san: res.san, uci: res.uci };
     const nextMoves = [...activeChapter.moves.slice(0, ply), committed];
     const nextFens = [...activeChapter.fens.slice(0, ply + 1), toFen(res.next)];
@@ -203,6 +236,35 @@ export const StudiesView: React.FC<StudiesViewProps> = ({
     );
     setActiveChapterId(ch.id);
     setPly(0);
+  };
+
+  const handleImportChapterPgn = () => {
+    if (!activeStudy || !importPgnText.trim()) return;
+    const parsed = parsePgn(importPgnText);
+    const initFen = parsed.initialFen || toFen(createInitialState(parsed.variant));
+    const title =
+      parsed.headers['Event'] ||
+      (parsed.headers['White'] ? `${parsed.headers['White']} vs ${parsed.headers['Black'] || '?'}` : `Imported Chapter ${activeStudy.chapters.length + 1}`);
+    const ch: StudyChapter = {
+      id: `ch-${Date.now()}`,
+      title,
+      initialFen: initFen,
+      variant: parsed.variant,
+      moves: parsed.moves,
+      fens: parsed.fens,
+      comments: {},
+      nags: {},
+      annotations: {},
+    };
+    setStudies((prev) =>
+      prev.map((s) =>
+        s.id === activeStudy.id ? { ...s, chapters: [...s.chapters, ch], updatedAt: Date.now() } : s
+      )
+    );
+    setActiveChapterId(ch.id);
+    setPly(0);
+    setImportPgnText('');
+    setImportOpen(false);
   };
 
   const handleShareStudy = () => {
@@ -296,9 +358,33 @@ export const StudiesView: React.FC<StudiesViewProps> = ({
           </button>
         </div>
 
-        <span className="text-xs text-stone-500 dark:text-zinc-400">
-          Right-click squares or drag arrows on the Study board to annotate
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => {
+              const next = !lessonMode;
+              setLessonMode(next);
+              setLessonHint(false);
+              setLessonFeedback(null);
+              if (next) {
+                setPly(0);
+                setLessonCorrect(0);
+                setLessonAttempts(0);
+              }
+            }}
+            className={`px-3 py-1.5 rounded-lg border text-xs font-semibold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+              lessonMode
+                ? 'border-emerald-600 bg-emerald-600 text-white'
+                : 'border-stone-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-stone-700 dark:text-zinc-300'
+            }`}
+          >
+            <GraduationCap className="w-3.5 h-3.5" />
+            {lessonMode ? 'Interactive Lesson: ON' : 'Practice as Lesson'}
+          </button>
+          <span className="text-xs text-stone-500 dark:text-zinc-400">
+            Right-click or drag arrows to annotate
+          </span>
+        </div>
       </div>
 
       {/* ==================== STUDIES WORKSPACE ==================== */}
@@ -368,19 +454,57 @@ export const StudiesView: React.FC<StudiesViewProps> = ({
             </div>
 
             <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-4 space-y-3">
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between gap-2">
                 <h3 className="text-sm font-semibold text-stone-900 dark:text-zinc-100">
                   Chapters
                 </h3>
-                <button
-                  type="button"
-                  onClick={addChapter}
-                  className="text-xs text-emerald-600 font-medium flex items-center gap-0.5"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  Add
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setImportOpen((v) => !v)}
+                    className="text-xs text-stone-600 dark:text-zinc-400 hover:text-stone-900 dark:hover:text-zinc-100 font-medium flex items-center gap-0.5"
+                    title="Import PGN into new chapter"
+                  >
+                    <Upload className="w-3 h-3" />
+                    PGN
+                  </button>
+                  <button
+                    type="button"
+                    onClick={addChapter}
+                    className="text-xs text-emerald-600 font-medium flex items-center gap-0.5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Add
+                  </button>
+                </div>
               </div>
+              {importOpen && (
+                <div className="space-y-1.5 p-2 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800">
+                  <textarea
+                    rows={3}
+                    value={importPgnText}
+                    onChange={(e) => setImportPgnText(e.target.value)}
+                    placeholder="Paste PGN to add as a chapter..."
+                    className="w-full p-1.5 rounded border border-stone-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono text-[11px]"
+                  />
+                  <div className="flex justify-end gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setImportOpen(false)}
+                      className="px-2 py-1 text-[11px] text-stone-500"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleImportChapterPgn}
+                      className="px-2.5 py-1 rounded bg-emerald-600 text-white text-[11px] font-semibold"
+                    >
+                      Import
+                    </button>
+                  </div>
+                </div>
+              )}
               <div className="space-y-1">
                 {activeStudy.chapters.map((ch) => (
                   <button
@@ -389,6 +513,8 @@ export const StudiesView: React.FC<StudiesViewProps> = ({
                     onClick={() => {
                       setActiveChapterId(ch.id);
                       setPly(0);
+                      setLessonHint(false);
+                      setLessonFeedback(null);
                     }}
                     className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs ${
                       ch.id === activeChapter.id
@@ -417,10 +543,23 @@ export const StudiesView: React.FC<StudiesViewProps> = ({
                   annotations: { ...ch.annotations, [ply]: nextAnn },
                 }))
               }
+              suggestedArrows={
+                lessonMode && lessonHint && activeChapter.moves[ply]?.uci
+                  ? [
+                      {
+                        from: activeChapter.moves[ply].uci!.slice(0, 2),
+                        to: activeChapter.moves[ply].uci!.slice(2, 4),
+                        color: '#f59e0b',
+                      },
+                    ]
+                  : []
+              }
               boardTheme={prefs.boardTheme}
               pieceSet={prefs.pieceSet}
               showCoordinates={prefs.showCoordinates}
               highlightLegal={prefs.highlightLegalMoves}
+              showLastMove={prefs.showLastMove !== false}
+              pieceScale={prefs.pieceScale || 'normal'}
               lastMove={
                 ply > 0 && activeChapter.moves[ply - 1]
                   ? { from: activeChapter.moves[ply - 1].from, to: activeChapter.moves[ply - 1].to }
@@ -486,6 +625,54 @@ export const StudiesView: React.FC<StudiesViewProps> = ({
 
           {/* Right Annotations & Move Notation */}
           <div className="lg:col-span-4 space-y-4">
+            {lessonMode && (
+              <div className="bg-white dark:bg-zinc-900 border border-emerald-500/50 rounded-xl p-4 space-y-2.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-emerald-700 dark:text-emerald-300">
+                    Interactive Lesson · Guess the Line
+                  </span>
+                  <span className="font-mono tabular-nums text-stone-500 dark:text-zinc-400">
+                    {lessonCorrect}/{lessonAttempts} accurate
+                  </span>
+                </div>
+                <p className="text-xs text-stone-600 dark:text-zinc-400">
+                  {ply < activeChapter.moves.length
+                    ? `Find ${currentState.turn === 'w' ? 'White' : 'Black'}'s move at ply ${ply + 1}.`
+                    : 'All moves in this chapter completed!'}
+                </p>
+                {lessonFeedback && (
+                  <div className="text-xs font-medium text-stone-900 dark:text-zinc-100">
+                    {lessonFeedback}
+                  </div>
+                )}
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setLessonHint((h) => !h)}
+                    disabled={ply >= activeChapter.moves.length}
+                    className="px-2.5 py-1 rounded border border-stone-200 dark:border-zinc-700 text-xs font-medium flex items-center gap-1 disabled:opacity-40"
+                  >
+                    <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
+                    Hint
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPly(0);
+                      setLessonHint(false);
+                      setLessonFeedback(null);
+                      setLessonCorrect(0);
+                      setLessonAttempts(0);
+                    }}
+                    className="px-2.5 py-1 rounded border border-stone-200 dark:border-zinc-700 text-xs font-medium flex items-center gap-1"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Restart
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-4 space-y-3">
               <h3 className="text-sm font-semibold text-stone-900 dark:text-zinc-100">
                 Moves & Glyphs
@@ -494,26 +681,33 @@ export const StudiesView: React.FC<StudiesViewProps> = ({
                 {activeChapter.moves.length === 0 ? (
                   <span className="text-stone-400 font-sans">Play moves on the board to build this chapter.</span>
                 ) : (
-                  activeChapter.moves.map((m, idx) => {
-                    const mPly = idx + 1;
-                    const nag = activeChapter.nags[mPly] || '';
-                    return (
-                      <button
-                        key={idx}
-                        type="button"
-                        onClick={() => setPly(mPly)}
-                        className={`px-1.5 py-0.5 rounded ${
-                          ply === mPly
-                            ? 'bg-emerald-600 text-white font-semibold'
-                            : 'hover:bg-stone-200 dark:hover:bg-zinc-800 text-stone-800 dark:text-zinc-200'
-                        }`}
-                      >
-                        {idx % 2 === 0 ? `${Math.floor(idx / 2) + 1}.` : ''}
-                        {m.san}
-                        {nag}
-                      </button>
-                    );
-                  })
+                  activeChapter.moves
+                    .slice(0, lessonMode ? ply : activeChapter.moves.length)
+                    .map((m, idx) => {
+                      const mPly = idx + 1;
+                      const nag = activeChapter.nags[mPly] || '';
+                      return (
+                        <button
+                          key={idx}
+                          type="button"
+                          onClick={() => setPly(mPly)}
+                          className={`px-1.5 py-0.5 rounded ${
+                            ply === mPly
+                              ? 'bg-emerald-600 text-white font-semibold'
+                              : 'hover:bg-stone-200 dark:hover:bg-zinc-800 text-stone-800 dark:text-zinc-200'
+                          }`}
+                        >
+                          {idx % 2 === 0 ? `${Math.floor(idx / 2) + 1}.` : ''}
+                          {m.san}
+                          {nag}
+                        </button>
+                      );
+                    })
+                )}
+                {lessonMode && ply < activeChapter.moves.length && (
+                  <span className="text-stone-400 dark:text-zinc-500 font-sans italic">
+                    ({activeChapter.moves.length - ply} moves hidden in lesson mode)
+                  </span>
                 )}
               </div>
 

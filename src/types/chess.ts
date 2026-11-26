@@ -79,6 +79,7 @@ export type GameStatus =
   | 'draw_agreement'
   | 'resigned'
   | 'timeout'
+  | 'aborted'
   | 'variant_win';
 
 export interface GameResult {
@@ -207,6 +208,9 @@ export interface TournamentPlayer {
   streak: number;
   gamesPlayed: number;
   buchholz?: number;
+  team?: string;
+  title?: string;
+  isBot?: boolean;
   isUser?: boolean;
 }
 
@@ -249,12 +253,14 @@ export interface AuthUser {
   createdAt: string;
   plan?: PlanTier;
   quota?: DailyQuotaUsage;
+  isBot?: boolean;
 }
 
 export interface Tournament {
   id: string;
   name: string;
   format: 'arena' | 'swiss';
+  isTeamBattle?: boolean;
   variant: ChessVariant;
   timeControl: string;
   durationMinutes?: number; // Arena
@@ -309,6 +315,19 @@ export type ThemeMode = 'light' | 'dark';
 export type BoardThemeId = 'wood' | 'green' | 'blue' | 'walnut' | 'coral' | 'monochrome';
 export type PieceSetId = 'classic' | 'neo' | 'alpha' | 'minimal';
 export type BgThemeId = 'clean' | 'warm-linen' | 'obsidian-grid' | 'forest-slate';
+export type SoundThemeId = 'standard' | 'wood' | 'futuristic';
+export type MoveMethodId = 'both' | 'click' | 'drag';
+
+export type RatingCategory = 'bullet' | 'blitz' | 'rapid' | 'classical' | 'chess960';
+
+export interface UserRatings {
+  bullet: number;
+  blitz: number;
+  rapid: number;
+  classical: number;
+  chess960: number;
+  history: { date: string; category: RatingCategory; rating: number }[];
+}
 
 export type LanguageCode =
   | 'en' | 'es' | 'fr' | 'de' | 'pt' | 'it' | 'ru' | 'ja' | 'zh' | 'hi'
@@ -321,7 +340,17 @@ export interface UserPreferences {
   bgTheme: BgThemeId;
   language: LanguageCode;
   soundEnabled: boolean;
+  soundTheme?: SoundThemeId;
+  voiceEnabled?: boolean;
   showCoordinates: boolean;
   highlightLegalMoves: boolean;
+  showLastMove?: boolean;
+  blindfoldPieces?: boolean;
+  pieceScale?: 'normal' | 'large';
+  autoQueen?: boolean;
+  confirmMove?: boolean;
+  moveMethod?: MoveMethodId;
+  showRatings?: boolean;
+  isBot?: boolean;
   username: string;
 }

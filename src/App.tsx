@@ -10,7 +10,9 @@ import {
   PaymentReceipt,
   PlanTier,
   Puzzle,
+  RatingCategory,
   UserPreferences,
+  UserRatings,
 } from './types/chess';
 import {
   canConsumeQuota,
@@ -19,7 +21,7 @@ import {
   normalizeQuotaUsage,
   PLAN_CATALOG,
 } from './data/plans';
-import { parsePgn } from './engine/chessEngine';
+import { parseFen, parsePgn, VARIANTS } from './engine/chessEngine';
 import { detectOpeningFromMoves } from './data/openings';
 import { LANGUAGES, translate } from './data/i18n';
 import { PlayView } from './components/PlayView';
@@ -32,7 +34,7 @@ import { PreferencesModal } from './components/PreferencesModal';
 import { AuthModal } from './components/AuthModal';
 import { PlansModal } from './components/PlansModal';
 import { soundFX } from './utils/sound';
-import { SlidersHorizontal, User } from 'lucide-react';
+import { Keyboard, SlidersHorizontal, User, X } from 'lucide-react';
 
 type MainTab = 'play' | 'analysis' | 'puzzles' | 'tournaments' | 'community';
 
@@ -43,9 +45,33 @@ const DEFAULT_PREFS: UserPreferences = {
   bgTheme: 'clean',
   language: 'en',
   soundEnabled: true,
+  soundTheme: 'standard',
+  voiceEnabled: false,
   showCoordinates: true,
   highlightLegalMoves: true,
+  showLastMove: true,
+  blindfoldPieces: false,
+  pieceScale: 'normal',
+  autoQueen: false,
+  confirmMove: false,
+  moveMethod: 'both',
+  showRatings: true,
+  isBot: false,
   username: 'CaissaPlayer',
+};
+
+const DEFAULT_RATINGS: UserRatings = {
+  bullet: 1540,
+  blitz: 1620,
+  rapid: 1685,
+  classical: 1710,
+  chess960: 1590,
+  history: [
+    { date: '2026-11-01', category: 'blitz', rating: 1560 },
+    { date: '2026-11-08', category: 'blitz', rating: 1585 },
+    { date: '2026-11-15', category: 'blitz', rating: 1605 },
+    { date: '2026-11-22', category: 'blitz', rating: 1620 },
+  ],
 };
 
 function buildInitialGames(): GameRecord[] {
@@ -108,9 +134,20 @@ export default function App() {
     return DEFAULT_PREFS;
   });
 
+  const [userRatings, setUserRatings] = useState<UserRatings>(() => {
+    try {
+      const raw = localStorage.getItem('caissa_ratings_v1');
+      if (raw) return { ...DEFAULT_RATINGS, ...JSON.parse(raw) };
+    } catch {
+      // ignore
+    }
+    return DEFAULT_RATINGS;
+  });
+
   const [activeTab, setActiveTab] = useState<MainTab>('play');
   const [analysisSection, setAnalysisSection] = useState<'tools' | 'studies'>('tools');
   const [prefsOpen, setPrefsOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
 
   // Server-verified session held strictly in React state (never localStorage)
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
@@ -454,6 +491,72 @@ export default function App() {
     variant: ChessVariant;
   } | null>(null);
 
+  // Deep-link URL hash parser (#play=<variant>&fen=<encoded> / #analysis=<variant>&fen=<encoded>)
+  useEffect(() => {
+    const applyHashRoute = () => {
+      const rawHash = window.location.hash;
+      if (!rawHash || rawHash.length < 2) return;
+      const params = new URLSearchParams(rawHash.slice(1));
+      const validIds = new Set(VARIANTS.map((v) => v.id));
+
+      const playVar = params.get('play');
+      const analysisVar = params.get('analysis');
+      const rawFen = params.get('fen');
+
+      if (playVar && validIds.has(playVar as ChessVariant)) {
+        const variant = playVar as ChessVariant;
+        let validatedFen: string | null = null;
+        if (rawFen) {
+          try {
+            parseFen(rawFen, variant);
+            validatedFen = rawFen;
+          } catch {
+            validatedFen = null;
+          }
+        }
+        setPlayPayload({ variant, fen: validatedFen, key: Date.now() });
+        setActiveTab('play');
+      } else if (analysisVar && validIds.has(analysisVar as ChessVariant)) {
+        const variant = analysisVar as ChessVariant;
+        let validatedFen: string | undefined;
+        if (rawFen) {
+          try {
+            parseFen(rawFen, variant);
+            validatedFen = rawFen;
+          } catch {
+            validatedFen = undefined;
+          }
+        }
+        setAnalysisPayload({ variant, fen: validatedFen });
+        setAnalysisSection('tools');
+        setActiveTab('analysis');
+      }
+    };
+
+    applyHashRoute();
+    window.addEventListener('hashchange', applyHashRoute);
+    return () => window.removeEventListener('hashchange', applyHashRoute);
+  }, []);
+
+  // Global '?' Keyboard Shortcuts modal toggle
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      const target = e.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target?.isContentEditable) {
+        return;
+      }
+      if (e.key === '?' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        e.preventDefault();
+        setShortcutsOpen((prev) => !prev);
+      } else if (e.key === 'Escape') {
+        setShortcutsOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   // Sync dark mode class on <html> and save preferences
   useEffect(() => {
     const root = document.documentElement;
@@ -465,6 +568,7 @@ export default function App() {
     const langObj = LANGUAGES.find((l) => l.code === prefs.language);
     root.dir = langObj?.dir || 'ltr';
     soundFX.enabled = prefs.soundEnabled;
+    soundFX.theme = prefs.soundTheme || 'standard';
 
     try {
       localStorage.setItem('caissa_prefs_v1', JSON.stringify(prefs));
@@ -472,6 +576,14 @@ export default function App() {
       // ignore
     }
   }, [prefs]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('caissa_ratings_v1', JSON.stringify(userRatings));
+    } catch {
+      // ignore
+    }
+  }, [userRatings]);
 
   useEffect(() => {
     try {
@@ -488,6 +600,18 @@ export default function App() {
       // ignore
     }
   }, [userGamePuzzles]);
+
+  const handleApplyRatingDelta = (category: RatingCategory, delta: number) => {
+    setUserRatings((prev) => {
+      const nextVal = Math.max(400, prev[category] + delta);
+      const today = new Date().toISOString().slice(0, 10);
+      return {
+        ...prev,
+        [category]: nextVal,
+        history: [...prev.history.slice(-29), { date: today, category, rating: nextVal }],
+      };
+    });
+  };
 
   const t = (key: string) => translate(prefs.language, key);
 
@@ -606,9 +730,12 @@ export default function App() {
           <PlayView
             key={playPayload.key}
             prefs={prefs}
+            games={games}
+            userRatings={userRatings}
             initialVariant={playPayload.variant}
             initialFen={playPayload.fen}
             onGameCompleted={(rec) => setGames((prev) => [rec, ...prev])}
+            onApplyRatingDelta={handleApplyRatingDelta}
             onSendToAnalysis={handleOpenAnalysis}
           />
         )}
@@ -678,6 +805,7 @@ export default function App() {
             dailyUsage={dailyUsage}
             onConsumePuzzleQuota={() => handleConsumeQuota('puzzle')}
             onOpenPlans={() => setPlansModalOpen(true)}
+            onOpenInAnalysis={(fen) => handleOpenAnalysis({ fen, variant: 'standard' })}
           />
         )}
 
@@ -693,6 +821,8 @@ export default function App() {
         {activeTab === 'community' && (
           <CommunityView
             prefs={prefs}
+            games={games}
+            userRatings={userRatings}
             onChallengeStart={handleChallengeVariant}
             onSendToAnalysis={(payload) => handleOpenAnalysis(payload)}
           />
@@ -706,6 +836,15 @@ export default function App() {
             Caissa Chess · {t('zeroAds')} · Standard & 8 Variants · Local-first PGN & Studies
           </span>
           <div className="flex items-center gap-4">
+            <button
+              type="button"
+              onClick={() => setShortcutsOpen(true)}
+              className="hover:text-stone-900 dark:hover:text-zinc-200 underline-offset-2 hover:underline flex items-center gap-1"
+              title="Keyboard shortcuts (?)"
+            >
+              <Keyboard className="w-3.5 h-3.5" />
+              Shortcuts (?)
+            </button>
             <button
               type="button"
               onClick={() => setPlansModalOpen(true)}
@@ -764,6 +903,93 @@ export default function App() {
         onVerifyPayment={handleVerifyPayment}
         onOpenAuth={openAuthModal}
       />
+
+      {/* Global '?' Keyboard Shortcuts Modal */}
+      {shortcutsOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-zinc-950/60 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setShortcutsOpen(false)}
+        >
+          <div
+            className="w-full max-w-lg bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-6 space-y-5 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-stone-200 dark:border-zinc-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Keyboard className="w-4 h-4 text-emerald-600" />
+                <h2 className="text-base font-bold text-stone-900 dark:text-zinc-100">
+                  Keyboard & Board Shortcuts
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShortcutsOpen(false)}
+                className="p-1.5 rounded-lg hover:bg-stone-100 dark:hover:bg-zinc-800 text-stone-500"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
+              <div className="space-y-2">
+                <div className="font-semibold uppercase tracking-wider text-[11px] text-stone-500 dark:text-zinc-400">
+                  Move Navigation
+                </div>
+                <div className="space-y-1.5">
+                  {[
+                    ['← / →', 'Previous / Next move'],
+                    ['↑ / ↓', 'Start / End of game'],
+                    ['Space', 'Play top engine move (Analysis)'],
+                    ['F', 'Flip board orientation'],
+                    ['X', 'Toggle engine threat arrow'],
+                    ['Z', 'Toggle Zen focus mode'],
+                  ].map(([key, desc]) => (
+                    <div key={key} className="flex items-center justify-between gap-2">
+                      <span className="text-stone-700 dark:text-zinc-300">{desc}</span>
+                      <kbd className="px-2 py-0.5 rounded border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 font-mono text-[11px] text-stone-800 dark:text-zinc-200 shrink-0">
+                        {key}
+                      </kbd>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <div className="font-semibold uppercase tracking-wider text-[11px] text-stone-500 dark:text-zinc-400">
+                  Board Annotations & Help
+                </div>
+                <div className="space-y-1.5">
+                  {[
+                    ['Right-Click', 'Green circle / arrow'],
+                    ['Shift + Right', 'Red circle / arrow'],
+                    ['Alt + Right', 'Blue circle / arrow'],
+                    ['Shift+Alt+Right', 'Yellow circle / arrow'],
+                    ['?', 'Toggle this shortcuts modal'],
+                  ].map(([key, desc]) => (
+                    <div key={key} className="flex items-center justify-between gap-2">
+                      <span className="text-stone-700 dark:text-zinc-300">{desc}</span>
+                      <kbd className="px-2 py-0.5 rounded border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 font-mono text-[11px] text-stone-800 dark:text-zinc-200 shrink-0">
+                        {key}
+                      </kbd>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            <div className="text-[11px] text-stone-500 dark:text-zinc-400 border-t border-stone-100 dark:border-zinc-800 pt-3 flex items-center justify-between">
+              <span>Multi-premove queue: make moves while opponent thinks; right-click clears.</span>
+              <button
+                type="button"
+                onClick={() => setShortcutsOpen(false)}
+                className="px-3 py-1 rounded-lg bg-stone-900 dark:bg-zinc-100 text-white dark:text-zinc-900 font-semibold"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

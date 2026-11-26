@@ -3,12 +3,15 @@ import {
   BgThemeId,
   BoardThemeId,
   LanguageCode,
+  MoveMethodId,
   PieceSetId,
+  SoundThemeId,
   UserPreferences,
 } from '../types/chess';
 import { LANGUAGES } from '../data/i18n';
 import { BOARD_THEMES } from './ChessBoard';
 import { ChessPiece } from './ChessPiece';
+import { soundFX } from '../utils/sound';
 import { Moon, Sun, Volume2, VolumeX, X } from 'lucide-react';
 
 interface PreferencesModalProps {
@@ -217,8 +220,91 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
           </div>
         </div>
 
+        {/* Audio & Gameplay Input Behavior */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 border-t border-stone-100 dark:border-zinc-800">
+          <div>
+            <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1.5">
+              Sound Theme
+            </label>
+            <div className="flex gap-1.5">
+              {([
+                ['standard', 'Standard'],
+                ['wood', 'Wood Board'],
+                ['futuristic', 'Synth'],
+              ] as [SoundThemeId, string][]).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => {
+                    update({ soundTheme: id });
+                    soundFX.theme = id;
+                    soundFX.move();
+                  }}
+                  className={`flex-1 py-1.5 px-2 rounded-lg border text-xs font-medium ${
+                    (prefs.soundTheme || 'standard') === id
+                      ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300'
+                      : 'border-stone-200 dark:border-zinc-800'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1.5">
+              Piece Movement
+            </label>
+            <div className="flex gap-1.5">
+              {([
+                ['both', 'Click & Drag'],
+                ['click', 'Click Only'],
+                ['drag', 'Drag Only'],
+              ] as [MoveMethodId, string][]).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => update({ moveMethod: id })}
+                  className={`flex-1 py-1.5 px-2 rounded-lg border text-xs font-medium ${
+                    (prefs.moveMethod || 'both') === id
+                      ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300'
+                      : 'border-stone-200 dark:border-zinc-800'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div>
+            <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1.5">
+              Piece Size
+            </label>
+            <div className="flex gap-1.5">
+              {([
+                ['normal', 'Standard'],
+                ['large', 'Large'],
+              ] as ['normal' | 'large', string][]).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => update({ pieceScale: id })}
+                  className={`flex-1 py-1.5 px-2 rounded-lg border text-xs font-medium ${
+                    (prefs.pieceScale || 'normal') === id
+                      ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300'
+                      : 'border-stone-200 dark:border-zinc-800'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
         {/* Toggles */}
-        <div className="flex flex-wrap items-center gap-4 pt-2 border-t border-stone-100 dark:border-zinc-800">
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-3 pt-2 border-t border-stone-100 dark:border-zinc-800">
           <button
             type="button"
             onClick={() => update({ soundEnabled: !prefs.soundEnabled })}
@@ -227,6 +313,16 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
             {prefs.soundEnabled ? <Volume2 className="w-4 h-4 text-emerald-600" /> : <VolumeX className="w-4 h-4 text-stone-400" />}
             Sound Effects: {prefs.soundEnabled ? 'On' : 'Muted'}
           </button>
+
+          <label className="flex items-center gap-2 text-xs font-medium text-stone-700 dark:text-zinc-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={!!prefs.voiceEnabled}
+              onChange={(e) => update({ voiceEnabled: e.target.checked })}
+              className="accent-emerald-600"
+            />
+            Voice Move Announcer
+          </label>
 
           <label className="flex items-center gap-2 text-xs font-medium text-stone-700 dark:text-zinc-300 cursor-pointer">
             <input
@@ -247,6 +343,73 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
             />
             Show Legal Moves
           </label>
+
+          <label className="flex items-center gap-2 text-xs font-medium text-stone-700 dark:text-zinc-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={prefs.showLastMove !== false}
+              onChange={(e) => update({ showLastMove: e.target.checked })}
+              className="accent-emerald-600"
+            />
+            Highlight Last Move
+          </label>
+
+          <label className="flex items-center gap-2 text-xs font-medium text-stone-700 dark:text-zinc-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={!!prefs.blindfoldPieces}
+              onChange={(e) => update({ blindfoldPieces: e.target.checked })}
+              className="accent-emerald-600"
+            />
+            Blindfold Pieces
+          </label>
+
+          <label className="flex items-center gap-2 text-xs font-medium text-stone-700 dark:text-zinc-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={!!prefs.autoQueen}
+              onChange={(e) => update({ autoQueen: e.target.checked })}
+              className="accent-emerald-600"
+            />
+            Always Promote to Queen
+          </label>
+
+          <label className="flex items-center gap-2 text-xs font-medium text-stone-700 dark:text-zinc-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={!!prefs.confirmMove}
+              onChange={(e) => update({ confirmMove: e.target.checked })}
+              className="accent-emerald-600"
+            />
+            Move Confirmation
+          </label>
+
+          <label className="flex items-center gap-2 text-xs font-medium text-stone-700 dark:text-zinc-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={prefs.showRatings !== false}
+              onChange={(e) => update({ showRatings: e.target.checked })}
+              className="accent-emerald-600"
+            />
+            Show Player Ratings
+          </label>
+
+          <label
+            className="flex items-center gap-2 text-xs font-medium text-stone-700 dark:text-zinc-300 cursor-pointer"
+            title="BOT accounts are excluded from all leaderboards"
+          >
+            <input
+              type="checkbox"
+              checked={!!prefs.isBot}
+              onChange={(e) => update({ isBot: e.target.checked })}
+              className="accent-emerald-600"
+            />
+            BOT Account (No Leaderboards)
+          </label>
+        </div>
+
+        <div className="pt-2 border-t border-stone-100 dark:border-zinc-800 text-[11px] text-stone-500 dark:text-zinc-400">
+          Tip: Press <kbd className="px-1.5 py-0.5 rounded bg-stone-100 dark:bg-zinc-800 font-mono">?</kbd> anytime for keyboard shortcuts, or hold <kbd className="px-1 py-0.5 rounded bg-stone-100 dark:bg-zinc-800 font-mono">Shift</kbd> / <kbd className="px-1 py-0.5 rounded bg-stone-100 dark:bg-zinc-800 font-mono">Alt</kbd> + Right-Click to draw red, blue, or yellow arrows.
         </div>
       </div>
     </div>

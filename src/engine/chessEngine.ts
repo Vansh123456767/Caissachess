@@ -110,27 +110,62 @@ export function cloneState(state: BoardState): BoardState {
   };
 }
 
-export function generateChess960BackRank(): PieceType[] {
+export function getChess960BackRankById(id: number): PieceType[] {
+  const n = ((Math.floor(id) % 960) + 960) % 960;
   const rank: (PieceType | null)[] = Array(8).fill(null);
-  const darkSquares = [1, 3, 5, 7];
-  const lightSquares = [0, 2, 4, 6];
-  rank[darkSquares[Math.floor(Math.random() * 4)]] = 'b';
-  rank[lightSquares[Math.floor(Math.random() * 4)]] = 'b';
 
-  const emptyIndices = () => rank.map((v, i) => (v === null ? i : -1)).filter((i) => i !== -1);
-  let emp = emptyIndices();
-  rank[emp[Math.floor(Math.random() * emp.length)]] = 'q';
+  // Scharnagl algorithm:
+  // 1. Light-square bishop (b, d, f, h -> indices 1, 3, 5, 7)
+  const n2 = Math.floor(n / 4);
+  const b1 = n % 4;
+  rank[b1 * 2 + 1] = 'b';
 
-  emp = emptyIndices();
-  rank[emp[Math.floor(Math.random() * emp.length)]] = 'n';
-  emp = emptyIndices();
-  rank[emp[Math.floor(Math.random() * emp.length)]] = 'n';
+  // 2. Dark-square bishop (a, c, e, g -> indices 0, 2, 4, 6)
+  const n3 = Math.floor(n2 / 4);
+  const b2 = n2 % 4;
+  rank[b2 * 2] = 'b';
 
-  emp = emptyIndices();
-  rank[emp[0]] = 'r';
-  rank[emp[1]] = 'k';
-  rank[emp[2]] = 'r';
+  // 3. Queen on one of 6 remaining empty squares
+  const n4 = Math.floor(n3 / 6);
+  const qIdx = n3 % 6;
+  const emptyAfterB = rank.map((v, i) => (v === null ? i : -1)).filter((i) => i !== -1);
+  rank[emptyAfterB[qIdx]] = 'q';
+
+  // 4. Knights on 2 of 5 remaining empty squares (KRN table)
+  const knightTable: [number, number][] = [
+    [0, 1],
+    [0, 2],
+    [0, 3],
+    [0, 4],
+    [1, 2],
+    [1, 3],
+    [1, 4],
+    [2, 3],
+    [2, 4],
+    [3, 4],
+  ];
+  const [k1, k2] = knightTable[n4 % 10];
+  const emptyAfterQ = rank.map((v, i) => (v === null ? i : -1)).filter((i) => i !== -1);
+  rank[emptyAfterQ[k1]] = 'n';
+  rank[emptyAfterQ[k2]] = 'n';
+
+  // 5. Remaining 3 squares must be R - K - R
+  const emptyFinal = rank.map((v, i) => (v === null ? i : -1)).filter((i) => i !== -1);
+  rank[emptyFinal[0]] = 'r';
+  rank[emptyFinal[1]] = 'k';
+  rank[emptyFinal[2]] = 'r';
   return rank as PieceType[];
+}
+
+export function getChess960FenById(id: number): string {
+  const rank = getChess960BackRankById(id);
+  const lower = rank.join('');
+  const upper = lower.toUpperCase();
+  return `${lower}/pppppppp/8/8/8/8/PPPPPPPP/${upper} w KQkq - 0 1`;
+}
+
+export function generateChess960BackRank(): PieceType[] {
+  return getChess960BackRankById(Math.floor(Math.random() * 960));
 }
 
 export function getInitialFen(variant: ChessVariant): string {
@@ -139,12 +174,8 @@ export function getInitialFen(variant: ChessVariant): string {
       return 'rnbqkbnr/pppppppp/8/1PP2PP1/PPPPPPPP/PPPPPPPP/PPPPPPPP/PPPPPPPP w kq - 0 1';
     case 'racingKings':
       return '8/8/8/8/8/8/krbnNBRK/qrbnNBRQ w - - 0 1';
-    case 'chess960': {
-      const rank = generateChess960BackRank();
-      const lower = rank.join('');
-      const upper = lower.toUpperCase();
-      return `${lower}/pppppppp/8/8/8/8/PPPPPPPP/${upper} w KQkq - 0 1`;
-    }
+    case 'chess960':
+      return getChess960FenById(Math.floor(Math.random() * 960));
     default:
       return 'rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1';
   }

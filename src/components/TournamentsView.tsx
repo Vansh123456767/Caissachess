@@ -18,7 +18,23 @@ import {
 import { findBestMove } from '../engine/aiSearch';
 import { ChessBoard } from './ChessBoard';
 import { soundFX } from '../utils/sound';
-import { Flame, LogIn, Plus, Swords, Trash2, Trophy, X, Zap } from 'lucide-react';
+import { isBotAccount } from '../utils/botFilter';
+import {
+  Flame,
+  LogIn,
+  MessageSquare,
+  Pause,
+  Play,
+  Plus,
+  Send,
+  Shield,
+  Swords,
+  Table,
+  Trash2,
+  Trophy,
+  X,
+  Zap,
+} from 'lucide-react';
 
 interface TournamentsViewProps {
   prefs: UserPreferences;
@@ -28,6 +44,13 @@ interface TournamentsViewProps {
 }
 
 const TIME_CONTROLS = ['1+0', '3+0', '3+2', '5+3', '10+0', '10+5', '15+10'];
+
+const TEAM_BATTLE_CLUBS = [
+  'Caissa Vanguard',
+  'Tactical Union',
+  'Endgame Guild',
+  'Chess960 Pioneers',
+];
 
 function createSeedTournaments(username: string): Tournament[] {
   return [
@@ -87,7 +110,56 @@ function createSeedTournaments(username: string): Tournament[] {
         { id: 's5', name: 'Henrik_FM', rating: 2190, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
       ],
     },
+    {
+      id: 'battle-world-teams',
+      name: 'Caissa World Team Battle',
+      format: 'arena',
+      isTeamBattle: true,
+      variant: 'standard',
+      timeControl: '3+2',
+      durationMinutes: 60,
+      currentRound: 1,
+      status: 'active',
+      joined: false,
+      createdBy: 'Team League',
+      players: [
+        { id: 'tb1', name: 'GM_Aurelia', rating: 2480, score: 16, streak: 3, gamesPlayed: 5, team: 'Caissa Vanguard' },
+        { id: 'tb2', name: 'Elena_Tactics', rating: 1780, score: 11, streak: 2, gamesPlayed: 5, team: 'Tactical Union' },
+        { id: 'tb3', name: 'IM_Soren', rating: 2350, score: 14, streak: 2, gamesPlayed: 5, team: 'Endgame Guild' },
+        { id: 'tb4', name: 'Marcus_960', rating: 1945, score: 12, streak: 1, gamesPlayed: 5, team: 'Chess960 Pioneers' },
+        { id: 'tb5', name: 'Viktor_Rapid', rating: 1620, score: 8, streak: 1, gamesPlayed: 4, team: 'Caissa Vanguard' },
+        { id: 'tb6', name: 'Nadia_K', rating: 1740, score: 9, streak: 0, gamesPlayed: 5, team: 'Tactical Union' },
+        { id: 'tb7', name: 'Theo_Endgame', rating: 1860, score: 7, streak: 0, gamesPlayed: 4, team: 'Endgame Guild' },
+        { id: 'tb8', name: 'Henrik_FM', rating: 2190, score: 10, streak: 1, gamesPlayed: 4, team: 'Chess960 Pioneers' },
+      ],
+    },
+    {
+      id: 'battle-variants-clash',
+      name: 'Variants Guild Team Clash',
+      format: 'arena',
+      isTeamBattle: true,
+      variant: 'chess960',
+      timeControl: '5+0',
+      durationMinutes: 45,
+      currentRound: 1,
+      status: 'active',
+      joined: false,
+      createdBy: 'Chess960 Pioneers',
+      players: [
+        { id: 'vc1', name: 'Marcus_960', rating: 1945, score: 14, streak: 3, gamesPlayed: 4, team: 'Chess960 Pioneers' },
+        { id: 'vc2', name: 'DropMaster', rating: 2110, score: 12, streak: 2, gamesPlayed: 4, team: 'Tactical Union' },
+        { id: 'vc3', name: 'EightVariants', rating: 1890, score: 8, streak: 0, gamesPlayed: 4, team: 'Caissa Vanguard' },
+        { id: 'vc4', name: 'ClaraV', rating: 1580, score: 6, streak: 1, gamesPlayed: 4, team: 'Endgame Guild' },
+      ],
+    },
   ];
+}
+
+interface LobbyChatMsg {
+  id: string;
+  author: string;
+  text: string;
+  time: string;
 }
 
 export const TournamentsView: React.FC<TournamentsViewProps> = ({
@@ -96,7 +168,13 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
   authToken,
   onOpenAuth,
 }) => {
-  const [formatFilter, setFormatFilter] = useState<'arena' | 'swiss'>('arena');
+  const [formatFilter, setFormatFilter] = useState<'arena' | 'swiss' | 'team_battle'>('arena');
+  const [lobbyTab, setLobbyTab] = useState<'standings' | 'pairings' | 'crosstable' | 'chat'>('standings');
+  const [selectedTeam, setSelectedTeam] = useState<string>(TEAM_BATTLE_CLUBS[0]);
+  const [pausedMap, setPausedMap] = useState<Record<string, boolean>>({});
+  const [chatByTournament, setChatByTournament] = useState<Record<string, LobbyChatMsg[]>>({});
+  const [chatInput, setChatInput] = useState('');
+  const [roundResults, setRoundResults] = useState<Record<string, Record<string, (string | null)[]>>>({});
   const [tournaments, setTournaments] = useState<Tournament[]>(() =>
     createSeedTournaments(prefs.username)
   );
@@ -105,7 +183,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
 
   // Create Tournament form state
   const [newName, setNewName] = useState('');
-  const [newFormat, setNewFormat] = useState<'arena' | 'swiss'>('arena');
+  const [newFormat, setNewFormat] = useState<'arena' | 'swiss' | 'team_battle'>('arena');
   const [newVariant, setNewVariant] = useState<ChessVariant>('standard');
   const [newTimeControl, setNewTimeControl] = useState<string>('3+2');
   const [newDuration, setNewDuration] = useState<number>(30);
@@ -136,7 +214,10 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
         if (!resp.ok) return;
         const data = await resp.json();
         if (!cancelled && Array.isArray(data?.tournaments) && data.tournaments.length > 0) {
-          setTournaments(data.tournaments);
+          const seedBattles = createSeedTournaments(prefs.username).filter((t) => t.isTeamBattle);
+          const serverList: Tournament[] = data.tournaments;
+          const hasBattles = serverList.some((t) => t.isTeamBattle);
+          setTournaments(hasBattles ? serverList : [...serverList, ...seedBattles]);
         }
       } catch {
         // Offline / fallback to local seed list
@@ -146,28 +227,90 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [authToken]);
+  }, [authToken, prefs.username]);
 
-  const visibleTournaments = tournaments.filter((t) => t.format === formatFilter);
+  const visibleTournaments = tournaments.filter((t) =>
+    formatFilter === 'team_battle' ? Boolean(t.isTeamBattle) : t.format === formatFilter && !t.isTeamBattle
+  );
   const activeTournament =
     tournaments.find((t) => t.id === activeId) || visibleTournaments[0] || tournaments[0];
 
   useEffect(() => {
-    if (activeTournament && activeTournament.format !== formatFilter) {
-      const firstMatch = tournaments.find((t) => t.format === formatFilter);
+    const matchesCurrentFilter =
+      activeTournament &&
+      (formatFilter === 'team_battle'
+        ? Boolean(activeTournament.isTeamBattle)
+        : activeTournament.format === formatFilter && !activeTournament.isTeamBattle);
+    if (!matchesCurrentFilter) {
+      const firstMatch = tournaments.find((t) =>
+        formatFilter === 'team_battle'
+          ? Boolean(t.isTeamBattle)
+          : t.format === formatFilter && !t.isTeamBattle
+      );
       if (firstMatch) setActiveId(firstMatch.id);
     }
   }, [formatFilter, activeTournament, tournaments]);
 
+  const isUserBot = isBotAccount({
+    name: prefs.username,
+    isBot: prefs.isBot || authUser?.isBot,
+  });
+
   const sortedStandings = useMemo(() => {
     if (!activeTournament) return [];
-    return [...activeTournament.players].sort(
-      (a, b) => b.score - a.score || (b.buchholz || 0) - (a.buchholz || 0) || b.rating - a.rating
-    );
-  }, [activeTournament]);
+    return activeTournament.players
+      .filter((p) => !isBotAccount(p) && !(p.isUser && isUserBot))
+      .sort(
+        (a, b) => b.score - a.score || (b.buchholz || 0) - (a.buchholz || 0) || b.rating - a.rating
+      );
+  }, [activeTournament, isUserBot]);
+
+  const roundPairings = useMemo(() => {
+    const pairs: { board: number; white: TournamentPlayer; black: TournamentPlayer | null }[] = [];
+    for (let i = 0; i < sortedStandings.length; i += 2) {
+      const a = sortedStandings[i];
+      const b = sortedStandings[i + 1] || null;
+      const swap = ((activeTournament?.currentRound || 1) + i) % 2 === 1 && b !== null;
+      pairs.push({
+        board: Math.floor(i / 2) + 1,
+        white: swap && b ? b : a,
+        black: swap && b ? a : b,
+      });
+    }
+    return pairs;
+  }, [sortedStandings, activeTournament?.currentRound]);
+
+  const teamStandings = useMemo(() => {
+    if (!activeTournament?.isTeamBattle) return [];
+    const grouped = new Map<string, TournamentPlayer[]>();
+    for (const p of activeTournament.players) {
+      if (isBotAccount(p) || (p.isUser && isUserBot)) continue;
+      const teamName = p.team || 'Independent';
+      const list = grouped.get(teamName) || [];
+      list.push(p);
+      grouped.set(teamName, list);
+    }
+    return Array.from(grouped.entries())
+      .map(([teamName, members]) => {
+        const sortedMembers = [...members].sort((a, b) => b.score - a.score || b.rating - a.rating);
+        const top3 = sortedMembers.slice(0, 3);
+        const totalScore = top3.reduce((acc, m) => acc + m.score, 0);
+        return {
+          teamName,
+          memberCount: members.length,
+          topContributors: top3,
+          totalScore,
+        };
+      })
+      .sort((a, b) => b.totalScore - a.totalScore || b.memberCount - a.memberCount);
+  }, [activeTournament, isUserBot]);
 
   const toggleJoin = async (t: Tournament) => {
-    if (authToken) {
+    if (!t.joined && isUserBot) {
+      setStatusNotice('Bots are not allowed in tournament leaderboards.');
+      return;
+    }
+    if (authToken && !t.isTeamBattle) {
       try {
         const resp = await fetch(`/api/tournaments/${encodeURIComponent(t.id)}/join`, {
           method: 'POST',
@@ -191,6 +334,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       prev.map((item) => {
         if (item.id !== t.id) return item;
         if (item.joined) {
+          setPausedMap((pm) => ({ ...pm, [t.id]: false }));
           return {
             ...item,
             joined: false,
@@ -210,6 +354,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
               streak: 0,
               gamesPlayed: 0,
               buchholz: 0,
+              team: item.isTeamBattle ? selectedTeam : undefined,
               isUser: true,
             },
           ],
@@ -222,10 +367,13 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     e.preventDefault();
     setStatusNotice(null);
     const variantLabel = VARIANTS.find((v) => v.id === newVariant)?.name || 'Open';
+    const isTeamBattle = newFormat === 'team_battle';
+    const apiFormat: 'arena' | 'swiss' = newFormat === 'swiss' ? 'swiss' : 'arena';
     const finalName =
-      newName.trim() || `${variantLabel} ${newFormat === 'arena' ? 'Arena' : 'Swiss'}`;
+      newName.trim() ||
+      `${variantLabel} ${isTeamBattle ? 'Team Battle' : apiFormat === 'arena' ? 'Arena' : 'Swiss'}`;
 
-    if (authToken) {
+    if (authToken && !isTeamBattle) {
       setCreateBusy(true);
       try {
         const resp = await fetch('/api/tournaments', {
@@ -236,11 +384,11 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
           },
           body: JSON.stringify({
             name: finalName,
-            format: newFormat,
+            format: apiFormat,
             variant: newVariant,
             timeControl: newTimeControl,
-            durationMinutes: newFormat === 'arena' ? newDuration : undefined,
-            totalRounds: newFormat === 'swiss' ? newRounds : undefined,
+            durationMinutes: apiFormat === 'arena' ? newDuration : undefined,
+            totalRounds: apiFormat === 'swiss' ? newRounds : undefined,
           }),
         });
         const data = await resp.json().catch(() => ({}));
@@ -260,15 +408,16 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       }
     }
 
-    // Local session fallback when not logged in
+    // Local session creation (also used for Team Battles)
     const created: Tournament = {
       id: `tour-${Date.now()}`,
       name: finalName,
-      format: newFormat,
+      format: apiFormat,
+      isTeamBattle,
       variant: newVariant,
       timeControl: newTimeControl,
-      durationMinutes: newFormat === 'arena' ? newDuration : undefined,
-      totalRounds: newFormat === 'swiss' ? newRounds : undefined,
+      durationMinutes: apiFormat === 'arena' ? newDuration : undefined,
+      totalRounds: apiFormat === 'swiss' ? newRounds : undefined,
       currentRound: 1,
       status: 'active',
       joined: true,
@@ -277,20 +426,48 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
         {
           id: 'user',
           name: prefs.username,
-          rating: 1620,
+          rating: authUser?.rating || 1620,
           score: 0,
           streak: 0,
           gamesPlayed: 0,
           buchholz: 0,
+          team: isTeamBattle ? selectedTeam : undefined,
           isUser: true,
         },
-        { id: `b1-${Date.now()}`, name: 'Elena_Tactics', rating: 1780, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: `b2-${Date.now()}`, name: 'Marcus_960', rating: 1945, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: `b3-${Date.now()}`, name: 'Aria_Club', rating: 1440, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
+        {
+          id: `b1-${Date.now()}`,
+          name: 'Elena_Tactics',
+          rating: 1780,
+          score: 0,
+          streak: 0,
+          gamesPlayed: 0,
+          buchholz: 0,
+          team: isTeamBattle ? TEAM_BATTLE_CLUBS[1] : undefined,
+        },
+        {
+          id: `b2-${Date.now()}`,
+          name: 'Marcus_960',
+          rating: 1945,
+          score: 0,
+          streak: 0,
+          gamesPlayed: 0,
+          buchholz: 0,
+          team: isTeamBattle ? TEAM_BATTLE_CLUBS[2] : undefined,
+        },
+        {
+          id: `b3-${Date.now()}`,
+          name: 'Aria_Club',
+          rating: 1440,
+          score: 0,
+          streak: 0,
+          gamesPlayed: 0,
+          buchholz: 0,
+          team: isTeamBattle ? TEAM_BATTLE_CLUBS[3] : undefined,
+        },
       ],
     };
     setTournaments((prev) => [created, ...prev]);
-    setFormatFilter(created.format);
+    setFormatFilter(isTeamBattle ? 'team_battle' : created.format);
     setActiveId(created.id);
     setNewName('');
     setCreateOpen(false);
@@ -315,9 +492,18 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
 
   const launchPairing = (berserk = false) => {
     if (!activeTournament) return;
+    if (isUserBot) {
+      setStatusNotice('Bots are not allowed in tournament leaderboards.');
+      return;
+    }
+    if (pausedMap[activeTournament.id]) {
+      setPausedMap((pm) => ({ ...pm, [activeTournament.id]: false }));
+    }
     if (!activeTournament.joined) void toggleJoin(activeTournament);
-    const pool = activeTournament.players.filter((p) => !p.isUser);
-    const opp = pool[Math.floor(Math.random() * pool.length)] || {
+    const pool = activeTournament.players.filter((p) => !p.isUser && (!activeTournament.isTeamBattle || p.team !== selectedTeam));
+    const fallbackPool = activeTournament.players.filter((p) => !p.isUser);
+    const candidates = pool.length > 0 ? pool : fallbackPool;
+    const opp = candidates[Math.floor(Math.random() * candidates.length)] || {
       id: 'opp',
       name: 'ClubChallenger',
       rating: 1600,
@@ -343,9 +529,20 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     if (!playingMatch) return;
     const matchId = playingMatch.tournamentId;
     const wasBerserk = playingMatch.berserk;
+    const oppId = playingMatch.opponent.id;
+    const userTag = outcome === 'win' ? (wasBerserk ? '2⚡' : '1') : outcome === 'draw' ? '½' : '0';
+    setRoundResults((prev) => {
+      const tourMap = { ...(prev[matchId] || {}) };
+      const userArr = [...(tourMap.user || []), userTag];
+      const oppArr = [...(tourMap[oppId] || []), outcome === 'win' ? '0' : outcome === 'draw' ? '½' : '1'];
+      tourMap.user = userArr;
+      tourMap[oppId] = oppArr;
+      return { ...prev, [matchId]: tourMap };
+    });
     setPlayingMatch((pm) => (pm ? { ...pm, resultText: reason } : null));
 
-    if (authToken) {
+    const currentTour = tournaments.find((t) => t.id === matchId);
+    if (authToken && !currentTour?.isTeamBattle) {
       try {
         const resp = await fetch(`/api/tournaments/${encodeURIComponent(matchId)}/result`, {
           method: 'POST',
@@ -419,6 +616,32 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     );
   };
 
+  const formatMatchClock = (sec: number) => {
+    const s = Math.max(0, Math.floor(sec));
+    return `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
+  };
+
+  // Live clock tick inside active tournament match (Berserk disables increment)
+  useEffect(() => {
+    if (!playingMatch || playingMatch.resultText) return;
+    const interval = window.setInterval(() => {
+      setPlayingMatch((pm) => {
+        if (!pm || pm.resultText) return pm;
+        const userTurn = pm.state.turn === pm.userColor;
+        const nextUserSec = userTurn ? Math.max(0, pm.clockSec - 1) : pm.clockSec;
+        const nextOppSec = !userTurn ? Math.max(0, pm.oppClockSec - 1) : pm.oppClockSec;
+        if (nextUserSec === 0) {
+          void recordTournamentOutcome('loss', 'Flagged on time');
+        } else if (nextOppSec === 0) {
+          void recordTournamentOutcome('win', 'Opponent ran out of time');
+        }
+        return { ...pm, clockSec: nextUserSec, oppClockSec: nextOppSec };
+      });
+    }, 1000);
+    return () => window.clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [Boolean(playingMatch), playingMatch?.resultText]);
+
   // AI response inside active tournament game
   useEffect(() => {
     if (!playingMatch || playingMatch.resultText) return;
@@ -431,7 +654,10 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       const res = makeMove(playingMatch.state, move);
       const term = evaluateGameResult(res.next);
       soundFX.move();
-      setPlayingMatch((pm) => (pm ? { ...pm, state: res.next } : null));
+      const inc = parseInt(activeTournament?.timeControl.split('+')[1] || '0', 10) || 0;
+      setPlayingMatch((pm) =>
+        pm ? { ...pm, state: res.next, oppClockSec: pm.oppClockSec + inc } : null
+      );
 
       if (term) {
         const outcome =
@@ -449,7 +675,12 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     const res = makeMove(playingMatch.state, mv);
     const term = evaluateGameResult(res.next);
     soundFX.move();
-    setPlayingMatch((pm) => (pm ? { ...pm, state: res.next } : null));
+    const inc = playingMatch.berserk
+      ? 0
+      : parseInt(activeTournament?.timeControl.split('+')[1] || '0', 10) || 0;
+    setPlayingMatch((pm) =>
+      pm ? { ...pm, state: res.next, clockSec: pm.clockSec + inc } : null
+    );
     if (term) {
       const outcome =
         term.winner === 'draw' ? 'draw' : term.winner === playingMatch.userColor ? 'win' : 'loss';
@@ -457,11 +688,74 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     }
   };
 
+  const sendLobbyChat = (preset?: string) => {
+    if (!activeTournament) return;
+    const text = (preset ?? chatInput).trim();
+    if (!text) return;
+    const tId = activeTournament.id;
+    const msg: LobbyChatMsg = {
+      id: `tc-${Date.now()}`,
+      author: prefs.username,
+      text,
+      time: new Date().toTimeString().slice(0, 5),
+    };
+    setChatByTournament((prev) => ({
+      ...prev,
+      [tId]: [...(prev[tId] || []), msg],
+    }));
+    if (!preset) setChatInput('');
+
+    const pool = activeTournament.players.filter((p) => !p.isUser);
+    const responder = pool[Math.floor(Math.random() * pool.length)];
+    if (responder) {
+      window.setTimeout(() => {
+        const replies = [
+          'Good luck everyone!',
+          'That last endgame was sharp.',
+          'Going for a berserk streak this round!',
+          'Watch out for the leader board surge.',
+        ];
+        setChatByTournament((prev) => ({
+          ...prev,
+          [tId]: [
+            ...(prev[tId] || []),
+            {
+              id: `tcr-${Date.now()}`,
+              author: responder.name,
+              text: replies[Math.floor(Math.random() * replies.length)],
+              time: new Date().toTimeString().slice(0, 5),
+            },
+          ],
+        }));
+      }, 650);
+    }
+  };
+
+  const activeLobbyMessages = useMemo(() => {
+    if (!activeTournament) return [];
+    const custom = chatByTournament[activeTournament.id] || [];
+    const seeded: LobbyChatMsg[] = [
+      {
+        id: `seed-1-${activeTournament.id}`,
+        author: activeTournament.createdBy || 'Tournament Director',
+        text: `Welcome to ${activeTournament.name}! Fair play rules active; enjoy the pairings.`,
+        time: '19:00',
+      },
+      {
+        id: `seed-2-${activeTournament.id}`,
+        author: activeTournament.players[0]?.name || 'GM_Aurelia',
+        text: 'glhf everyone, sharp games ahead!',
+        time: '19:04',
+      },
+    ];
+    return [...seeded, ...custom];
+  }, [activeTournament, chatByTournament]);
+
   return (
     <div className="space-y-6">
       {/* Header Bar */}
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-stone-200 dark:border-zinc-800 pb-3">
-        <div className="flex items-center gap-1 p-1 bg-stone-100 dark:bg-zinc-900 rounded-lg">
+        <div className="flex items-center gap-1 p-1 bg-stone-100 dark:bg-zinc-900 rounded-lg overflow-x-auto">
           <button
             type="button"
             onClick={() => setFormatFilter('arena')}
@@ -472,7 +766,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
             }`}
           >
             <Flame className="w-3.5 h-3.5 text-amber-500" />
-            Arena Tournaments
+            Arena
           </button>
           <button
             type="button"
@@ -484,7 +778,19 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
             }`}
           >
             <Trophy className="w-3.5 h-3.5 text-emerald-600" />
-            Swiss Tournaments
+            Swiss
+          </button>
+          <button
+            type="button"
+            onClick={() => setFormatFilter('team_battle')}
+            className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+              formatFilter === 'team_battle'
+                ? 'bg-white dark:bg-zinc-800 text-stone-900 dark:text-zinc-100 shadow-sm'
+                : 'text-stone-600 dark:text-zinc-400'
+            }`}
+          >
+            <Shield className="w-3.5 h-3.5 text-indigo-500" />
+            Team Battles
           </button>
         </div>
 
@@ -603,7 +909,22 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                 </div>
               )}
 
-              <div className="flex justify-center">
+              <div className="flex flex-col items-center gap-2">
+                <div className="w-full max-w-[460px] flex items-center justify-between px-3 py-1.5 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 text-xs">
+                  <span className="font-semibold text-stone-800 dark:text-zinc-200">
+                    {playingMatch.opponent.name} ({playingMatch.opponent.rating})
+                  </span>
+                  <span
+                    className={`font-mono tabular-nums text-sm font-bold px-2 py-0.5 rounded ${
+                      playingMatch.state.turn !== playingMatch.userColor && !playingMatch.resultText
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-stone-700 dark:text-zinc-300'
+                    }`}
+                  >
+                    {formatMatchClock(playingMatch.oppClockSec)}
+                  </span>
+                </div>
+
                 <ChessBoard
                   state={playingMatch.state}
                   onMove={handleTournamentMove}
@@ -614,8 +935,26 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                   pieceSet={prefs.pieceSet}
                   showCoordinates={prefs.showCoordinates}
                   highlightLegal={prefs.highlightLegalMoves}
+                  showLastMove={prefs.showLastMove ?? true}
+                  pieceScale={prefs.pieceScale || 'normal'}
+                  autoQueen={prefs.autoQueen}
                   maxWidthClass="max-w-[460px]"
                 />
+
+                <div className="w-full max-w-[460px] flex items-center justify-between px-3 py-1.5 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 text-xs">
+                  <span className="font-semibold text-stone-800 dark:text-zinc-200">
+                    {prefs.username} {playingMatch.berserk ? '· Berserk' : ''}
+                  </span>
+                  <span
+                    className={`font-mono tabular-nums text-sm font-bold px-2 py-0.5 rounded ${
+                      playingMatch.state.turn === playingMatch.userColor && !playingMatch.resultText
+                        ? 'bg-emerald-600 text-white'
+                        : 'text-stone-700 dark:text-zinc-300'
+                    }`}
+                  >
+                    {formatMatchClock(playingMatch.clockSec)}
+                  </span>
+                </div>
               </div>
             </div>
           ) : (
@@ -645,7 +984,21 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                     </p>
                   </div>
 
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
+                    {activeTournament.isTeamBattle && !activeTournament.joined && (
+                      <select
+                        value={selectedTeam}
+                        onChange={(e) => setSelectedTeam(e.target.value)}
+                        className="px-2.5 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-xs text-stone-800 dark:text-zinc-200"
+                        title="Choose team to represent"
+                      >
+                        {TEAM_BATTLE_CLUBS.map((club) => (
+                          <option key={club} value={club}>
+                            {club}
+                          </option>
+                        ))}
+                      </select>
+                    )}
                     <button
                       type="button"
                       onClick={() => void toggleJoin(activeTournament)}
@@ -657,13 +1010,46 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                     >
                       {activeTournament.joined ? 'Withdraw' : 'Join Tournament'}
                     </button>
+                    {activeTournament.joined && activeTournament.format === 'arena' && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setPausedMap((pm) => ({
+                            ...pm,
+                            [activeTournament.id]: !pm[activeTournament.id],
+                          }))
+                        }
+                        className={`px-3 py-2 rounded-lg border text-xs font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 ${
+                          pausedMap[activeTournament.id]
+                            ? 'border-amber-500 bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300'
+                            : 'border-stone-300 dark:border-zinc-700 text-stone-700 dark:text-zinc-300'
+                        }`}
+                        title="Pause pairings without withdrawing"
+                      >
+                        {pausedMap[activeTournament.id] ? (
+                          <>
+                            <Play className="w-3.5 h-3.5" />
+                            Resume
+                          </>
+                        ) : (
+                          <>
+                            <Pause className="w-3.5 h-3.5" />
+                            Pause
+                          </>
+                        )}
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => launchPairing(false)}
                       className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0"
                     >
                       <Swords className="w-3.5 h-3.5" />
-                      {activeTournament.format === 'arena' ? 'Play Next Pairing' : `Play Round ${activeTournament.currentRound}`}
+                      {activeTournament.format === 'arena'
+                        ? pausedMap[activeTournament.id]
+                          ? 'Resume & Pair'
+                          : 'Play Next Pairing'
+                        : `Play Round ${activeTournament.currentRound}`}
                     </button>
                     {activeTournament.format === 'arena' && (
                       <button
@@ -679,57 +1065,348 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                   </div>
                 </div>
 
-                {/* Live Standings Table */}
-                <div className="overflow-x-auto">
-                  <table className="w-full text-xs text-left">
-                    <thead>
-                      <tr className="border-b border-stone-200 dark:border-zinc-800 text-stone-500 dark:text-zinc-400">
-                        <th className="py-2 pr-3 font-medium">#</th>
-                        <th className="py-2 pr-3 font-medium">Player</th>
-                        <th className="py-2 pr-3 font-medium">Rating</th>
-                        <th className="py-2 pr-3 font-medium">Games</th>
-                        {activeTournament.format === 'swiss' && (
-                          <th className="py-2 pr-3 font-medium">Buchholz</th>
-                        )}
-                        <th className="py-2 text-right font-medium">Score</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-stone-100 dark:divide-zinc-800/70">
-                      {sortedStandings.map((pl, idx) => (
-                        <tr
-                          key={pl.id}
-                          className={
-                            pl.isUser ? 'bg-emerald-50/70 dark:bg-emerald-950/25 font-semibold' : ''
-                          }
+                {activeTournament.joined && pausedMap[activeTournament.id] && (
+                  <div className="px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900 text-xs text-amber-800 dark:text-amber-200">
+                    You are currently paused in this arena. Click Resume or Play Next Pairing when ready.
+                  </div>
+                )}
+
+                {/* Team Battle Standings Table */}
+                {activeTournament.isTeamBattle && teamStandings.length > 0 && (
+                  <div className="rounded-xl border border-stone-200 dark:border-zinc-800 bg-stone-50/70 dark:bg-zinc-950 p-4 space-y-2.5">
+                    <div className="flex items-center justify-between">
+                      <h3 className="text-xs font-semibold uppercase tracking-wider text-stone-600 dark:text-zinc-400 flex items-center gap-1.5">
+                        <Shield className="w-3.5 h-3.5 text-indigo-500" />
+                        Team Battle Leaderboard (Top 3 Scorers Count)
+                      </h3>
+                      <span className="text-[11px] font-mono text-stone-500 dark:text-zinc-400">
+                        {teamStandings.length} teams
+                      </span>
+                    </div>
+                    <div className="divide-y divide-stone-200/70 dark:divide-zinc-800 text-xs">
+                      {teamStandings.map((team, idx) => (
+                        <div
+                          key={team.teamName}
+                          className="py-2 flex flex-wrap items-center justify-between gap-2"
                         >
-                          <td className="py-2.5 pr-3 font-mono text-stone-500 dark:text-zinc-400">
-                            {idx + 1}
-                          </td>
-                          <td className="py-2.5 pr-3 text-stone-900 dark:text-zinc-100">
-                            {pl.name}
-                            {pl.streak >= 2 && activeTournament.format === 'arena' && (
-                              <span className="ml-2 text-amber-500 font-mono">({pl.streak} streak)</span>
-                            )}
-                          </td>
-                          <td className="py-2.5 pr-3 font-mono text-stone-600 dark:text-zinc-400">
-                            {pl.rating}
-                          </td>
-                          <td className="py-2.5 pr-3 font-mono text-stone-600 dark:text-zinc-400">
-                            {pl.gamesPlayed}
-                          </td>
-                          {activeTournament.format === 'swiss' && (
-                            <td className="py-2.5 pr-3 font-mono text-stone-600 dark:text-zinc-400">
-                              {(pl.buchholz || 0).toFixed(1)}
-                            </td>
-                          )}
-                          <td className="py-2.5 text-right font-mono font-bold text-stone-900 dark:text-zinc-100">
-                            {pl.score}
-                          </td>
-                        </tr>
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span className="font-mono tabular-nums text-stone-400 w-5">
+                              #{idx + 1}
+                            </span>
+                            <span className="font-semibold text-stone-900 dark:text-zinc-100">
+                              {team.teamName}
+                            </span>
+                            <span className="text-[11px] text-stone-500 dark:text-zinc-400 truncate">
+                              ({team.topContributors.map((c) => `${c.name} ${c.score}`).join(', ')})
+                            </span>
+                          </div>
+                          <span className="font-mono font-bold tabular-nums text-indigo-600 dark:text-indigo-400">
+                            {team.totalScore} pts
+                          </span>
+                        </div>
                       ))}
-                    </tbody>
-                  </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Lobby View Switcher: Standings / Pairings / Crosstable / Lobby Chat */}
+                <div className="flex items-center gap-1 p-1 bg-stone-100 dark:bg-zinc-950 rounded-lg w-fit overflow-x-auto">
+                  <button
+                    type="button"
+                    onClick={() => setLobbyTab('standings')}
+                    className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                      lobbyTab === 'standings'
+                        ? 'bg-white dark:bg-zinc-800 text-stone-900 dark:text-zinc-100 shadow-xs'
+                        : 'text-stone-500 dark:text-zinc-400'
+                    }`}
+                  >
+                    <Trophy className="w-3.5 h-3.5" />
+                    Standings
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLobbyTab('pairings')}
+                    className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                      lobbyTab === 'pairings'
+                        ? 'bg-white dark:bg-zinc-800 text-stone-900 dark:text-zinc-100 shadow-xs'
+                        : 'text-stone-500 dark:text-zinc-400'
+                    }`}
+                  >
+                    <Swords className="w-3.5 h-3.5" />
+                    Pairings
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLobbyTab('crosstable')}
+                    className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                      lobbyTab === 'crosstable'
+                        ? 'bg-white dark:bg-zinc-800 text-stone-900 dark:text-zinc-100 shadow-xs'
+                        : 'text-stone-500 dark:text-zinc-400'
+                    }`}
+                  >
+                    <Table className="w-3.5 h-3.5" />
+                    Crosstable
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setLobbyTab('chat')}
+                    className={`px-3 py-1.5 rounded-md text-xs font-medium flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+                      lobbyTab === 'chat'
+                        ? 'bg-white dark:bg-zinc-800 text-stone-900 dark:text-zinc-100 shadow-xs'
+                        : 'text-stone-500 dark:text-zinc-400'
+                    }`}
+                  >
+                    <MessageSquare className="w-3.5 h-3.5" />
+                    Lobby Chat
+                  </button>
                 </div>
+
+                {/* Live Standings Table */}
+                {lobbyTab === 'standings' && (
+                  <div className="space-y-2">
+                    <div className="text-[11px] text-stone-500 dark:text-zinc-400">
+                      Human players only · Bots are not allowed in leaderboards
+                    </div>
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs text-left">
+                      <thead>
+                        <tr className="border-b border-stone-200 dark:border-zinc-800 text-stone-500 dark:text-zinc-400">
+                          <th className="py-2 pr-3 font-medium">#</th>
+                          <th className="py-2 pr-3 font-medium">Player</th>
+                          {activeTournament.isTeamBattle && (
+                            <th className="py-2 pr-3 font-medium">Team</th>
+                          )}
+                          <th className="py-2 pr-3 font-medium">Rating</th>
+                          <th className="py-2 pr-3 font-medium">Games</th>
+                          {activeTournament.format === 'swiss' && (
+                            <th className="py-2 pr-3 font-medium">Buchholz</th>
+                          )}
+                          <th className="py-2 text-right font-medium">Score</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-stone-100 dark:divide-zinc-800/70">
+                        {sortedStandings.map((pl, idx) => (
+                          <tr
+                            key={pl.id}
+                            className={
+                              pl.isUser ? 'bg-emerald-50/70 dark:bg-emerald-950/25 font-semibold' : ''
+                            }
+                          >
+                            <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-500 dark:text-zinc-400">
+                              {idx + 1}
+                            </td>
+                            <td className="py-2.5 pr-3 text-stone-900 dark:text-zinc-100">
+                              {pl.name}
+                              {pl.streak >= 2 && activeTournament.format === 'arena' && (
+                                <span className="ml-2 text-amber-500 font-mono">
+                                  ({pl.streak} streak)
+                                </span>
+                              )}
+                            </td>
+                            {activeTournament.isTeamBattle && (
+                              <td className="py-2.5 pr-3 text-stone-600 dark:text-zinc-400">
+                                {pl.team || 'Open'}
+                              </td>
+                            )}
+                            <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-600 dark:text-zinc-400">
+                              {pl.rating}
+                            </td>
+                            <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-600 dark:text-zinc-400">
+                              {pl.gamesPlayed}
+                            </td>
+                            {activeTournament.format === 'swiss' && (
+                              <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-600 dark:text-zinc-400">
+                                {(pl.buchholz || 0).toFixed(1)}
+                              </td>
+                            )}
+                            <td className="py-2.5 text-right font-mono tabular-nums font-bold text-stone-900 dark:text-zinc-100">
+                              {pl.score}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    </div>
+                  </div>
+                )}
+
+                {/* Round Pairings Table */}
+                {lobbyTab === 'pairings' && (
+                  <div className="space-y-3">
+                    <div className="flex items-center justify-between text-xs text-stone-500 dark:text-zinc-400">
+                      <span>
+                        {activeTournament.format === 'swiss'
+                          ? `Round ${activeTournament.currentRound} of ${activeTournament.totalRounds} Pairings`
+                          : 'Active Arena Matchups'}
+                      </span>
+                      <span className="font-mono tabular-nums">{roundPairings.length} boards</span>
+                    </div>
+                    <div className="divide-y divide-stone-100 dark:divide-zinc-800 border border-stone-200 dark:border-zinc-800 rounded-lg overflow-hidden">
+                      {roundPairings.map((pair) => {
+                        const involvesUser = pair.white.isUser || pair.black?.isUser;
+                        return (
+                          <div
+                            key={pair.board}
+                            className={`px-3 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs ${
+                              involvesUser ? 'bg-emerald-50/70 dark:bg-emerald-950/25' : ''
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0">
+                              <span className="font-mono text-stone-400 w-7 shrink-0">
+                                Bd {pair.board}
+                              </span>
+                              <div className="min-w-0">
+                                <span className="font-semibold text-stone-900 dark:text-zinc-100">
+                                  {pair.white.name} ({pair.white.rating})
+                                </span>
+                                <span className="mx-2 text-stone-400">vs</span>
+                                <span className="font-semibold text-stone-900 dark:text-zinc-100">
+                                  {pair.black ? `${pair.black.name} (${pair.black.rating})` : 'BYE (1 pt)'}
+                                </span>
+                              </div>
+                            </div>
+                            {involvesUser && pair.black && (
+                              <button
+                                type="button"
+                                onClick={() => launchPairing(false)}
+                                className="px-2.5 py-1 rounded bg-emerald-600 text-white text-[11px] font-semibold whitespace-nowrap shrink-0"
+                              >
+                                Play Board
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                {/* Crosstable Matrix */}
+                {lobbyTab === 'crosstable' && (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs text-left border-collapse">
+                      <thead>
+                        <tr className="border-b border-stone-200 dark:border-zinc-800 text-stone-500 dark:text-zinc-400">
+                          <th className="py-2 pr-3 font-medium">Player</th>
+                          {sortedStandings.map((_, colIdx) => (
+                            <th key={colIdx} className="py-2 px-2 text-center font-mono">
+                              #{colIdx + 1}
+                            </th>
+                          ))}
+                          <th className="py-2 pl-3 text-right font-medium">Pts</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-stone-100 dark:divide-zinc-800/70">
+                        {sortedStandings.map((rowPl, rIdx) => {
+                          const recorded = roundResults[activeTournament.id]?.[rowPl.id] || [];
+                          return (
+                            <tr
+                              key={rowPl.id}
+                              className={rowPl.isUser ? 'bg-emerald-50/50 dark:bg-emerald-950/20 font-semibold' : ''}
+                            >
+                              <td className="py-2 pr-3 text-stone-900 dark:text-zinc-100 whitespace-nowrap">
+                                <span className="font-mono text-stone-400 mr-1.5">{rIdx + 1}.</span>
+                                {rowPl.name}
+                              </td>
+                              {sortedStandings.map((colPl, cIdx) => {
+                                if (rowPl.id === colPl.id) {
+                                  return (
+                                    <td
+                                      key={colPl.id}
+                                      className="py-2 px-2 text-center font-mono bg-stone-100 dark:bg-zinc-800/60 text-stone-400"
+                                    >
+                                      ×
+                                    </td>
+                                  );
+                                }
+                                let cell = '·';
+                                const recordedVal = recorded[cIdx];
+                                if (recordedVal) {
+                                  cell = recordedVal;
+                                } else if (rowPl.gamesPlayed > 0 && colPl.gamesPlayed > 0) {
+                                  cell =
+                                    rowPl.score > colPl.score
+                                      ? '1'
+                                      : rowPl.score === colPl.score
+                                      ? '½'
+                                      : '0';
+                                }
+                                return (
+                                  <td
+                                    key={colPl.id}
+                                    className={`py-2 px-2 text-center font-mono tabular-nums ${
+                                      cell.startsWith('1') || cell.startsWith('2')
+                                        ? 'text-emerald-600 dark:text-emerald-400 font-semibold'
+                                        : cell === '0'
+                                        ? 'text-red-500'
+                                        : 'text-stone-500 dark:text-zinc-400'
+                                    }`}
+                                  >
+                                    {cell}
+                                  </td>
+                                );
+                              })}
+                              <td className="py-2 pl-3 text-right font-mono font-bold tabular-nums text-stone-900 dark:text-zinc-100">
+                                {rowPl.score}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+
+                {/* Tournament Lobby Chat */}
+                {lobbyTab === 'chat' && (
+                  <div className="space-y-3">
+                    <div className="h-52 overflow-y-auto thin-scroll space-y-2 p-3 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800">
+                      {activeLobbyMessages.map((m) => (
+                        <div key={m.id} className="text-xs leading-relaxed">
+                          <span className="font-mono text-[10px] text-stone-400 mr-1.5">
+                            [{m.time}]
+                          </span>
+                          <span className="font-semibold text-stone-900 dark:text-zinc-100 mr-1.5">
+                            {m.author}:
+                          </span>
+                          <span className="text-stone-700 dark:text-zinc-300">{m.text}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {['glhf!', 'Great round!', 'Berserk time!'].map((preset) => (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => sendLobbyChat(preset)}
+                          className="px-2.5 py-1 rounded border border-stone-200 dark:border-zinc-700 text-[11px] font-medium text-stone-600 dark:text-zinc-300 hover:bg-stone-100 dark:hover:bg-zinc-800"
+                        >
+                          {preset}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={chatInput}
+                        onChange={(e) => setChatInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') sendLobbyChat();
+                        }}
+                        placeholder="Message tournament lobby..."
+                        className="flex-1 px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-xs text-stone-900 dark:text-zinc-100"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => sendLobbyChat()}
+                        className="px-3.5 py-2 rounded-lg bg-stone-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                      >
+                        <Send className="w-3.5 h-3.5" />
+                        Send
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )
           )}
@@ -780,7 +1457,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                   <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1">
                     Format
                   </label>
-                  <div className="grid grid-cols-2 gap-1 p-1 bg-stone-100 dark:bg-zinc-950 rounded-lg">
+                  <div className="grid grid-cols-3 gap-1 p-1 bg-stone-100 dark:bg-zinc-950 rounded-lg">
                     <button
                       type="button"
                       onClick={() => setNewFormat('arena')}
@@ -802,6 +1479,17 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                       }`}
                     >
                       Swiss
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setNewFormat('team_battle')}
+                      className={`py-1.5 rounded-md text-xs font-semibold ${
+                        newFormat === 'team_battle'
+                          ? 'bg-white dark:bg-zinc-800 text-stone-900 dark:text-zinc-100 shadow-xs'
+                          : 'text-stone-500'
+                      }`}
+                    >
+                      Battle
                     </button>
                   </div>
                 </div>
