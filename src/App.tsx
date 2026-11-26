@@ -34,7 +34,7 @@ import { PreferencesModal } from './components/PreferencesModal';
 import { AuthModal } from './components/AuthModal';
 import { PlansModal } from './components/PlansModal';
 import { soundFX } from './utils/sound';
-import { Keyboard, SlidersHorizontal, User, X } from 'lucide-react';
+import { Flame, Keyboard, SlidersHorizontal, User, X } from 'lucide-react';
 
 type MainTab = 'play' | 'analysis' | 'puzzles' | 'tournaments' | 'community';
 
@@ -73,6 +73,64 @@ const DEFAULT_RATINGS: UserRatings = {
     { date: '2026-11-22', category: 'blitz', rating: 1620 },
   ],
 };
+
+const STREAK_STORAGE_KEY = 'caissa_daily_streak_v1';
+
+interface DailyStreakRecord {
+  count: number;
+  lastDate: string;
+}
+
+function formatLocalCalendarDate(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+function getYesterdayCalendarDate(base = new Date()): string {
+  const prev = new Date(base.getFullYear(), base.getMonth(), base.getDate() - 1);
+  return formatLocalCalendarDate(prev);
+}
+
+function loadDailyStreakMap(): Record<string, DailyStreakRecord> {
+  try {
+    const raw = localStorage.getItem(STREAK_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object'
+      ? (parsed as Record<string, DailyStreakRecord>)
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function recordUserLoginStreak(username: string): number {
+  const key = username.trim().toLowerCase() || 'player';
+  const now = new Date();
+  const today = formatLocalCalendarDate(now);
+  const yesterday = getYesterdayCalendarDate(now);
+  const map = loadDailyStreakMap();
+  const existing = map[key];
+
+  let nextCount = 1;
+  if (existing && typeof existing.count === 'number' && existing.count >= 1) {
+    if (existing.lastDate === today) {
+      nextCount = existing.count;
+    } else if (existing.lastDate === yesterday) {
+      nextCount = existing.count + 1;
+    }
+  }
+
+  map[key] = { count: nextCount, lastDate: today };
+  try {
+    localStorage.setItem(STREAK_STORAGE_KEY, JSON.stringify(map));
+  } catch {
+    // ignore storage quota errors
+  }
+  return nextCount;
+}
 
 function buildInitialGames(): GameRecord[] {
   const sample1 = `[Event "Rapid Club Match"]\n[White "CaissaPlayer"]\n[Black "Elena_Tactics"]\n[Result "1-0"]\n\n1. e4 e5 2. Nf3 Nc6 3. Bb5 a6 4. Ba4 Nf6 5. O-O Be7 6. Re1 b5 7. Bb3 d6 8. c3 O-O 9. h3 Na5 10. Bc2 c5 11. d4 Qc7 1-0`;
@@ -152,6 +210,7 @@ export default function App() {
   // Server-verified session held strictly in React state (never localStorage)
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [dailyStreak, setDailyStreak] = useState<number>(0);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
   const [plansModalOpen, setPlansModalOpen] = useState(false);
@@ -224,6 +283,7 @@ export default function App() {
   const handleAuthSuccess = (token: string, user: AuthUser) => {
     setAuthToken(token);
     setAuthUser(user);
+    setDailyStreak(recordUserLoginStreak(user.username));
     setPrefs((prev) => ({ ...prev, username: user.username }));
     if (user.plan) setPlanTier(user.plan);
     if (user.quota) setDailyUsage(normalizeQuotaUsage(user.quota));
@@ -245,6 +305,7 @@ export default function App() {
     const token = authToken;
     setAuthToken(null);
     setAuthUser(null);
+    setDailyStreak(0);
     setPrefs((prev) => ({ ...prev, username: DEFAULT_PREFS.username }));
     const guest = loadGuestPlanState();
     setPlanTier(guest.plan);
@@ -650,14 +711,24 @@ export default function App() {
           {/* Zone 3: Account + Preferences */}
           <div className="shrink-0 flex items-center gap-2">
             {authUser ? (
-              <button
-                type="button"
-                onClick={() => openAuthModal('login')}
-                className="px-3 py-1.5 rounded-lg border border-emerald-600/40 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-              >
-                <User className="w-3.5 h-3.5" />
-                <span>{authUser.username}</span>
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => openAuthModal('login')}
+                  className="px-3 py-1.5 rounded-lg border border-emerald-600/40 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+                >
+                  <User className="w-3.5 h-3.5" />
+                  <span>{authUser.username}</span>
+                </button>
+                <div
+                  className="px-2.5 py-1.5 rounded-lg border border-amber-300/80 dark:border-amber-700/70 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 text-xs font-semibold whitespace-nowrap shrink-0 flex items-center gap-1.5 tabular-nums"
+                  title={`Daily Streak: ${dailyStreak} consecutive ${dailyStreak === 1 ? 'day' : 'days'} logged in`}
+                  aria-label={`Daily Streak: ${dailyStreak} days`}
+                >
+                  <Flame className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  <span>Daily Streak: {dailyStreak}</span>
+                </div>
+              </>
             ) : (
               <>
                 <button
