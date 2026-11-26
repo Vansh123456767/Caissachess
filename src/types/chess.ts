@@ -216,7 +216,7 @@ export interface TournamentPlayer {
 
 export type PlanTier = 'free' | 'pro' | 'max';
 
-export type PaymentMethod = 'upi' | 'netbanking' | 'card';
+export type PaymentMethod = 'upi' | 'netbanking' | 'card' | 'razorpay';
 
 export interface DailyQuotaUsage {
   date: string;
@@ -231,6 +231,9 @@ export interface PaymentOrderInfo {
   amountInr: number;
   currency: 'INR';
   provider: 'stripe' | 'razorpay' | 'sandbox';
+  razorpayOrderId?: string;
+  razorpayKeyId?: string;
+  razorpayMode?: 'live' | 'test';
   checkoutUrl?: string;
 }
 
@@ -244,6 +247,7 @@ export interface PaymentReceipt {
   methodLabel: string;
   status: 'paid';
   paidAt: string;
+  razorpayPaymentId?: string;
 }
 
 export interface AuthUser {

@@ -293,38 +293,26 @@ export default function App() {
   const handleCreatePaymentOrder = async (
     plan: Exclude<PlanTier, 'free'>
   ): Promise<{ ok: boolean; order?: PaymentOrderInfo; error?: string }> => {
-    if (authToken) {
-      try {
-        const resp = await fetch('/api/payments/create-order', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify({ plan }),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok || !data?.orderId) {
-          return { ok: false, error: data?.error || 'Could not start checkout.' };
-        }
-        return { ok: true, order: data as PaymentOrderInfo };
-      } catch {
-        return { ok: false, error: 'Unable to reach payment server.' };
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (authToken) {
+        headers.Authorization = `Bearer ${authToken}`;
       }
+      const resp = await fetch('/api/payments/create-order', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ plan }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data?.orderId) {
+        return { ok: false, error: data?.error || 'Could not start checkout.' };
+      }
+      return { ok: true, order: data as PaymentOrderInfo };
+    } catch {
+      return { ok: false, error: 'Unable to reach payment server.' };
     }
-
-    const amountInr = PLAN_CATALOG[plan].priceInr;
-    return {
-      ok: true,
-      order: {
-        orderId: `ord_guest_${Date.now().toString(36)}`,
-        orderToken: 'guest_checkout',
-        plan,
-        amountInr,
-        currency: 'INR',
-        provider: 'sandbox',
-      },
-    };
   };
 
   const handleVerifyPayment = async (payload: {
@@ -333,78 +321,55 @@ export default function App() {
     upiId?: string;
     bankName?: string;
     otpCode?: string;
+    razorpayOrderId?: string;
+    razorpayPaymentId?: string;
+    razorpaySignature?: string;
   }): Promise<{ ok: boolean; receipt?: PaymentReceipt; error?: string }> => {
-    const { order, method, upiId, bankName, otpCode } = payload;
-
-    if (authToken) {
-      try {
-        const resp = await fetch('/api/payments/verify', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${authToken}`,
-          },
-          body: JSON.stringify({
-            orderId: order.orderId,
-            orderToken: order.orderToken,
-            method,
-            upiId,
-            bankName,
-            otpCode,
-          }),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok || !data?.receipt) {
-          return { ok: false, error: data?.error || 'Payment verification failed.' };
-        }
-        setPlanTier(data.plan || order.plan);
-        if (data.quota) setDailyUsage(normalizeQuotaUsage(data.quota));
-        if (data.user) setAuthUser(data.user);
-        setPaymentReceipts((prev) => [data.receipt as PaymentReceipt, ...prev]);
-        return { ok: true, receipt: data.receipt as PaymentReceipt };
-      } catch {
-        return { ok: false, error: 'Unable to reach payment server.' };
-      }
-    }
-
-    // Guest local validation & receipt
-    let methodLabel = '';
-    if (method === 'upi') {
-      const cleanUpi = (upiId || '').trim();
-      if (!/^[a-zA-Z0-9._-]{2,64}@[a-zA-Z0-9]{2,32}$/.test(cleanUpi)) {
-        return { ok: false, error: 'Enter a valid UPI ID (for example, name@okicici).' };
-      }
-      methodLabel = `UPI (${cleanUpi})`;
-    } else if (method === 'netbanking') {
-      if (!bankName || bankName.trim().length < 2) {
-        return { ok: false, error: 'Select a bank for NetBanking authorization.' };
-      }
-      if (!/^\d{4,6}$/.test((otpCode || '').trim())) {
-        return { ok: false, error: 'Enter a 4–6 digit bank authorization OTP (e.g. 123456).' };
-      }
-      methodLabel = `NetBanking (${bankName.trim()})`;
-    } else {
-      if (!/^\d{4,6}$/.test((otpCode || '').trim())) {
-        return { ok: false, error: 'Enter a 4–6 digit 3DS OTP confirmation (e.g. 123456).' };
-      }
-      methodLabel = 'Card (3DS Tokenized)';
-    }
-
-    const receipt: PaymentReceipt = {
-      receiptId: `rcpt_${Date.now().toString(36)}`,
-      orderId: order.orderId,
-      plan: order.plan,
-      amountInr: order.amountInr,
-      currency: 'INR',
+    const {
+      order,
       method,
-      methodLabel,
-      status: 'paid',
-      paidAt: new Date().toISOString(),
-    };
-    setPlanTier(order.plan);
-    setDailyUsage((prev) => normalizeQuotaUsage(prev));
-    setPaymentReceipts((prev) => [receipt, ...prev]);
-    return { ok: true, receipt };
+      upiId,
+      bankName,
+      otpCode,
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature,
+    } = payload;
+
+    try {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
+      if (authToken) {
+        headers.Authorization = `Bearer ${authToken}`;
+      }
+      const resp = await fetch('/api/payments/verify', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          orderId: order.orderId,
+          orderToken: order.orderToken,
+          method,
+          upiId,
+          bankName,
+          otpCode,
+          razorpayOrderId,
+          razorpayPaymentId,
+          razorpaySignature,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data?.receipt) {
+        return { ok: false, error: data?.error || 'Payment verification failed.' };
+      }
+      setPlanTier(data.plan || order.plan);
+      if (data.quota) setDailyUsage(normalizeQuotaUsage(data.quota));
+      if (data.user) setAuthUser(data.user);
+      setPaymentReceipts((prev) => [data.receipt as PaymentReceipt, ...prev]);
+      return { ok: true, receipt: data.receipt as PaymentReceipt };
+    } catch {
+      return { ok: false, error: 'Unable to reach payment server.' };
+    }
   };
 
   const handleConsumeQuota = async (

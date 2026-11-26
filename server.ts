@@ -83,9 +83,11 @@ interface StoredPaymentOrder {
   currency: 'INR';
   provider: 'stripe' | 'razorpay' | 'sandbox';
   status: 'pending' | 'paid';
-  method?: 'upi' | 'netbanking' | 'card';
+  method?: 'upi' | 'netbanking' | 'card' | 'razorpay';
   methodLabel?: string;
   receiptId?: string;
+  razorpayOrderId?: string;
+  razorpayPaymentId?: string;
   createdAt: string;
   paidAt?: string;
 }
@@ -510,8 +512,49 @@ async function startServer() {
   });
 
   // ==================== PAYMENTS & CHECKOUT ROUTES ====================
-  app.post('/api/payments/create-order', requireAuth, (req: AuthedRequest, res: Response) => {
-    const user = req.authUser!;
+  function getRazorpayConfig() {
+    const keyId = (process.env.RAZORPAY_KEY_ID || '').trim();
+    const keySecret = (process.env.RAZORPAY_KEY_SECRET || '').trim();
+    const enabled = keyId.length > 0 && keySecret.length > 0;
+    const partial = (keyId.length > 0) !== (keySecret.length > 0);
+    const mode: 'live' | 'test' | 'sandbox' = !enabled
+      ? 'sandbox'
+      : keyId.startsWith('rzp_live_')
+      ? 'live'
+      : 'test';
+    return { keyId, keySecret, enabled, partial, mode };
+  }
+
+  function resolveOptionalAuth(
+    req: Request,
+    res: Response
+  ): { ok: true; user: StoredUser | null } | { ok: false } {
+    const token = extractBearer(req);
+    if (!token) {
+      return { ok: true, user: null };
+    }
+    const verified = verifyToken(token);
+    if (!verified) {
+      res.status(401).json({ error: 'Invalid or expired session' });
+      return { ok: false };
+    }
+    return { ok: true, user: verified.user };
+  }
+
+  app.get('/api/payments/config', (_req: Request, res: Response) => {
+    const cfg = getRazorpayConfig();
+    res.json({
+      razorpayEnabled: cfg.enabled,
+      mode: cfg.mode,
+    });
+  });
+
+  app.post('/api/payments/create-order', async (req: Request, res: Response) => {
+    const auth = resolveOptionalAuth(req, res);
+    if (!auth.ok) return;
+    const user = auth.user;
+    const ownerId = user ? user.id : 'guest';
+
     const rawPlan: unknown = req.body?.plan;
     if (rawPlan !== 'pro' && rawPlan !== 'max') {
       res.status(400).json({ error: 'Checkout is only required for Pro (₹100) or Max (₹1,000).' });
@@ -523,13 +566,89 @@ async function startServer() {
     const orderId = `ord_${crypto.randomUUID().replace(/-/g, '').slice(0, 14)}`;
     const orderToken = crypto
       .createHmac('sha256', SESSION_SECRET)
-      .update(`${orderId}:${user.id}:${plan}:${amountInr}`)
+      .update(`${orderId}:${ownerId}:${plan}:${amountInr}`)
       .digest('hex');
+
+    const cfg = getRazorpayConfig();
+    if (cfg.partial) {
+      res.status(503).json({
+        error:
+          'Razorpay is partially configured. Set both RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in AI Studio Secrets.',
+      });
+      return;
+    }
+
+    if (cfg.enabled) {
+      try {
+        const authHeader = Buffer.from(`${cfg.keyId}:${cfg.keySecret}`, 'utf8').toString('base64');
+        const rzpResp = await fetch('https://api.razorpay.com/v1/orders', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Basic ${authHeader}`,
+          },
+          body: JSON.stringify({
+            amount: amountInr * 100,
+            currency: 'INR',
+            receipt: orderId,
+            notes: {
+              plan,
+              accountType: user ? 'member' : 'guest',
+              username: user ? user.username : 'Guest',
+              app: 'CaissaChess',
+            },
+          }),
+        });
+        const rzpData = (await rzpResp.json().catch(() => ({}))) as {
+          id?: string;
+          error?: { description?: string };
+        };
+        if (!rzpResp.ok || !rzpData?.id) {
+          res.status(502).json({
+            error:
+              rzpData?.error?.description ||
+              'Razorpay could not create a payment order. Verify RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET.',
+          });
+          return;
+        }
+
+        const order: StoredPaymentOrder = {
+          orderId,
+          orderToken,
+          userId: ownerId,
+          plan,
+          amountInr,
+          currency: 'INR',
+          provider: 'razorpay',
+          status: 'pending',
+          razorpayOrderId: rzpData.id,
+          createdAt: new Date().toISOString(),
+        };
+        store.payments.push(order);
+        saveStore(store);
+
+        res.status(201).json({
+          orderId: order.orderId,
+          orderToken: order.orderToken,
+          plan: order.plan,
+          amountInr: order.amountInr,
+          currency: order.currency,
+          provider: order.provider,
+          razorpayOrderId: rzpData.id,
+          razorpayKeyId: cfg.keyId,
+          razorpayMode: cfg.mode === 'live' ? 'live' : 'test',
+        });
+        return;
+      } catch {
+        res.status(502).json({ error: 'Unable to connect to Razorpay API to create order.' });
+        return;
+      }
+    }
 
     const order: StoredPaymentOrder = {
       orderId,
       orderToken,
-      userId: user.id,
+      userId: ownerId,
       plan,
       amountInr,
       currency: 'INR',
@@ -550,19 +669,214 @@ async function startServer() {
     });
   });
 
-  app.post('/api/payments/verify', requireAuth, (req: AuthedRequest, res: Response) => {
-    const user = req.authUser!;
+  app.post('/api/payments/verify', async (req: Request, res: Response) => {
+    const auth = resolveOptionalAuth(req, res);
+    if (!auth.ok) return;
+    const user = auth.user;
+    const requesterId = user ? user.id : 'guest';
+
     const orderId = typeof req.body?.orderId === 'string' ? req.body.orderId.trim() : '';
     const orderToken = typeof req.body?.orderToken === 'string' ? req.body.orderToken.trim() : '';
-    const method = req.body?.method;
-    const upiId = typeof req.body?.upiId === 'string' ? req.body.upiId.trim() : '';
-    const bankName = typeof req.body?.bankName === 'string' ? req.body.bankName.trim() : '';
-    const otpCode = typeof req.body?.otpCode === 'string' ? req.body.otpCode.trim() : '';
 
     if (!orderId || !orderToken) {
       res.status(400).json({ error: 'Missing order reference.' });
       return;
     }
+
+    const order = store.payments.find((p) => p.orderId === orderId);
+    if (!order || order.userId !== requesterId) {
+      res.status(404).json({ error: 'Payment order not found for this session.' });
+      return;
+    }
+    if (order.status === 'paid') {
+      res.status(409).json({ error: 'This payment order has already been completed.' });
+      return;
+    }
+
+    const expectedToken = crypto
+      .createHmac('sha256', SESSION_SECRET)
+      .update(`${order.orderId}:${order.userId}:${order.plan}:${order.amountInr}`)
+      .digest('hex');
+    const suppliedBuf = Buffer.from(orderToken, 'utf8');
+    const expectedBuf = Buffer.from(expectedToken, 'utf8');
+    if (
+      suppliedBuf.length !== expectedBuf.length ||
+      !crypto.timingSafeEqual(suppliedBuf, expectedBuf)
+    ) {
+      res.status(403).json({ error: 'Payment order verification mismatch.' });
+      return;
+    }
+
+    if (order.provider === 'razorpay') {
+      const cfg = getRazorpayConfig();
+      if (!cfg.enabled || !order.razorpayOrderId) {
+        res.status(503).json({
+          error: 'Razorpay credentials are not available on the server to verify this order.',
+        });
+        return;
+      }
+
+      const rzpOrderId =
+        typeof req.body?.razorpayOrderId === 'string' ? req.body.razorpayOrderId.trim() : '';
+      const rzpPaymentId =
+        typeof req.body?.razorpayPaymentId === 'string' ? req.body.razorpayPaymentId.trim() : '';
+      const rzpSignature =
+        typeof req.body?.razorpaySignature === 'string'
+          ? req.body.razorpaySignature.trim().toLowerCase()
+          : '';
+
+      if (
+        !/^order_[A-Za-z0-9]{6,40}$/.test(rzpOrderId) ||
+        !/^pay_[A-Za-z0-9]{6,40}$/.test(rzpPaymentId) ||
+        !/^[0-9a-f]{64}$/.test(rzpSignature)
+      ) {
+        res.status(400).json({ error: 'Invalid Razorpay payment confirmation fields.' });
+        return;
+      }
+      if (rzpOrderId !== order.razorpayOrderId) {
+        res.status(403).json({ error: 'Razorpay order ID mismatch.' });
+        return;
+      }
+      if (store.payments.some((p) => p.razorpayPaymentId === rzpPaymentId)) {
+        res.status(409).json({ error: 'This Razorpay payment has already been redeemed.' });
+        return;
+      }
+
+      const expectedSig = crypto
+        .createHmac('sha256', cfg.keySecret)
+        .update(`${order.razorpayOrderId}|${rzpPaymentId}`)
+        .digest('hex');
+      const rzpSigBuf = Buffer.from(rzpSignature, 'utf8');
+      const expSigBuf = Buffer.from(expectedSig, 'utf8');
+      if (rzpSigBuf.length !== expSigBuf.length || !crypto.timingSafeEqual(rzpSigBuf, expSigBuf)) {
+        res.status(403).json({ error: 'Razorpay cryptographic signature verification failed.' });
+        return;
+      }
+
+      let methodLabel = 'Razorpay Checkout (INR)';
+      try {
+        const authHeader = Buffer.from(`${cfg.keyId}:${cfg.keySecret}`, 'utf8').toString('base64');
+        const payResp = await fetch(
+          `https://api.razorpay.com/v1/payments/${encodeURIComponent(rzpPaymentId)}`,
+          {
+            method: 'GET',
+            headers: { Authorization: `Basic ${authHeader}` },
+          }
+        );
+        const payData = (await payResp.json().catch(() => ({}))) as {
+          id?: string;
+          order_id?: string;
+          amount?: number;
+          currency?: string;
+          status?: string;
+          method?: string;
+          vpa?: string;
+          bank?: string;
+          card?: { last4?: string; network?: string };
+          error?: { description?: string };
+        };
+        if (!payResp.ok || !payData?.id) {
+          res.status(502).json({
+            error: payData?.error?.description || 'Could not confirm payment status with Razorpay.',
+          });
+          return;
+        }
+        if (
+          payData.order_id !== order.razorpayOrderId ||
+          payData.currency !== 'INR' ||
+          Number(payData.amount) !== order.amountInr * 100
+        ) {
+          res.status(403).json({ error: 'Razorpay payment amount or order does not match plan price.' });
+          return;
+        }
+        if (payData.status === 'authorized') {
+          const capResp = await fetch(
+            `https://api.razorpay.com/v1/payments/${encodeURIComponent(rzpPaymentId)}/capture`,
+            {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Basic ${authHeader}`,
+              },
+              body: JSON.stringify({
+                amount: order.amountInr * 100,
+                currency: 'INR',
+              }),
+            }
+          );
+          if (!capResp.ok) {
+            res.status(402).json({ error: 'Payment authorized but capture failed in Razorpay.' });
+            return;
+          }
+        } else if (payData.status !== 'captured') {
+          res.status(402).json({
+            error: `Payment status is "${payData.status || 'incomplete'}". Complete payment to activate your plan.`,
+          });
+          return;
+        }
+
+        if (payData.method === 'upi') {
+          methodLabel = payData.vpa ? `Razorpay UPI (${payData.vpa})` : 'Razorpay UPI';
+        } else if (payData.method === 'netbanking') {
+          methodLabel = payData.bank
+            ? `Razorpay NetBanking (${payData.bank})`
+            : 'Razorpay NetBanking';
+        } else if (payData.method === 'card') {
+          const net = payData.card?.network || 'Card';
+          const last4 = payData.card?.last4 ? ` •••• ${payData.card.last4}` : '';
+          methodLabel = `Razorpay ${net}${last4}`;
+        } else if (payData.method) {
+          methodLabel = `Razorpay (${payData.method.toUpperCase()})`;
+        }
+      } catch {
+        res.status(502).json({ error: 'Unable to reach Razorpay servers for payment confirmation.' });
+        return;
+      }
+
+      const paidAt = new Date().toISOString();
+      order.status = 'paid';
+      order.method = 'razorpay';
+      order.methodLabel = methodLabel;
+      order.receiptId = rzpPaymentId;
+      order.razorpayPaymentId = rzpPaymentId;
+      order.paidAt = paidAt;
+
+      let updatedQuota = normalizeQuotaUsage(undefined);
+      if (user) {
+        user.plan = order.plan;
+        user.quota = normalizeQuotaUsage(user.quota);
+        updatedQuota = user.quota;
+      }
+      saveStore(store);
+
+      res.json({
+        ok: true,
+        plan: order.plan,
+        quota: updatedQuota,
+        limits: getPlanLimits(order.plan),
+        user: user ? toPublicUser(user) : undefined,
+        receipt: {
+          receiptId: rzpPaymentId,
+          orderId: order.orderId,
+          plan: order.plan,
+          amountInr: order.amountInr,
+          currency: order.currency,
+          method: 'razorpay' as const,
+          methodLabel,
+          status: 'paid' as const,
+          paidAt,
+          razorpayPaymentId: rzpPaymentId,
+        },
+      });
+      return;
+    }
+
+    // Sandbox verification fallback when Razorpay keys are not configured
+    const method = req.body?.method;
+    const upiId = typeof req.body?.upiId === 'string' ? req.body.upiId.trim() : '';
+    const bankName = typeof req.body?.bankName === 'string' ? req.body.bankName.trim() : '';
+    const otpCode = typeof req.body?.otpCode === 'string' ? req.body.otpCode.trim() : '';
+
     if (method !== 'upi' && method !== 'netbanking' && method !== 'card') {
       res.status(400).json({ error: 'Select a valid payment method (UPI, NetBanking, or Card).' });
       return;
@@ -593,30 +907,6 @@ async function startServer() {
       methodLabel = 'Card (3DS Tokenized)';
     }
 
-    const order = store.payments.find((p) => p.orderId === orderId && p.userId === user.id);
-    if (!order) {
-      res.status(404).json({ error: 'Payment order not found for this account.' });
-      return;
-    }
-    if (order.status === 'paid') {
-      res.status(409).json({ error: 'This payment order has already been completed.' });
-      return;
-    }
-
-    const expectedToken = crypto
-      .createHmac('sha256', SESSION_SECRET)
-      .update(`${order.orderId}:${user.id}:${order.plan}:${order.amountInr}`)
-      .digest('hex');
-    const suppliedBuf = Buffer.from(orderToken, 'utf8');
-    const expectedBuf = Buffer.from(expectedToken, 'utf8');
-    if (
-      suppliedBuf.length !== expectedBuf.length ||
-      !crypto.timingSafeEqual(suppliedBuf, expectedBuf)
-    ) {
-      res.status(403).json({ error: 'Payment verification signature mismatch.' });
-      return;
-    }
-
     const receiptId = `rcpt_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
     const paidAt = new Date().toISOString();
 
@@ -626,16 +916,20 @@ async function startServer() {
     order.receiptId = receiptId;
     order.paidAt = paidAt;
 
-    user.plan = order.plan;
-    user.quota = normalizeQuotaUsage(user.quota);
+    let updatedQuota = normalizeQuotaUsage(undefined);
+    if (user) {
+      user.plan = order.plan;
+      user.quota = normalizeQuotaUsage(user.quota);
+      updatedQuota = user.quota;
+    }
     saveStore(store);
 
     res.json({
       ok: true,
       plan: order.plan,
-      quota: user.quota,
+      quota: updatedQuota,
       limits: getPlanLimits(order.plan),
-      user: toPublicUser(user),
+      user: user ? toPublicUser(user) : undefined,
       receipt: {
         receiptId,
         orderId: order.orderId,
@@ -664,6 +958,7 @@ async function startServer() {
         methodLabel: p.methodLabel || 'UPI',
         status: 'paid' as const,
         paidAt: p.paidAt || p.createdAt,
+        razorpayPaymentId: p.razorpayPaymentId,
       }))
       .sort((a, b) => b.paidAt.localeCompare(a.paidAt));
     res.json({ receipts });

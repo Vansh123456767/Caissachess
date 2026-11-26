@@ -25,6 +25,59 @@ import {
   X,
 } from 'lucide-react';
 
+interface RazorpaySuccessResponse {
+  razorpay_payment_id: string;
+  razorpay_order_id: string;
+  razorpay_signature: string;
+}
+
+interface RazorpayCheckoutOptions {
+  key: string;
+  amount: number;
+  currency: string;
+  name: string;
+  description: string;
+  order_id: string;
+  prefill?: { name?: string };
+  notes?: Record<string, string>;
+  theme?: { color?: string };
+  handler: (response: RazorpaySuccessResponse) => void;
+  modal?: { ondismiss?: () => void };
+}
+
+interface RazorpayInstance {
+  open: () => void;
+  on: (event: string, cb: (resp: { error?: { description?: string } }) => void) => void;
+}
+
+declare global {
+  interface Window {
+    Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayInstance;
+  }
+}
+
+function loadRazorpayCheckoutScript(): Promise<boolean> {
+  if (typeof window === 'undefined') return Promise.resolve(false);
+  if (window.Razorpay) return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    const existing = document.querySelector<HTMLScriptElement>(
+      'script[src="https://checkout.razorpay.com/v1/checkout.js"]'
+    );
+    if (existing) {
+      existing.addEventListener('load', () => resolve(Boolean(window.Razorpay)), { once: true });
+      existing.addEventListener('error', () => resolve(false), { once: true });
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = 'https://checkout.razorpay.com/v1/checkout.js';
+    script.async = true;
+    script.onload = () => resolve(Boolean(window.Razorpay));
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+}
+
 interface PlansModalProps {
   open: boolean;
   onClose: () => void;
@@ -42,6 +95,9 @@ interface PlansModalProps {
     upiId?: string;
     bankName?: string;
     otpCode?: string;
+    razorpayOrderId?: string;
+    razorpayPaymentId?: string;
+    razorpaySignature?: string;
   }) => Promise<{ ok: boolean; receipt?: PaymentReceipt; error?: string }>;
   onOpenAuth: (mode?: 'login' | 'register') => void;
 }
@@ -119,6 +175,7 @@ export const PlansModal: React.FC<PlansModalProps> = ({
   const [verifying, setVerifying] = useState(false);
   const [latestReceipt, setLatestReceipt] = useState<PaymentReceipt | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [gatewayMode, setGatewayMode] = useState<'live' | 'test' | 'sandbox'>('sandbox');
 
   useEffect(() => {
     if (open) {
@@ -127,6 +184,17 @@ export const PlansModal: React.FC<PlansModalProps> = ({
       setLatestReceipt(null);
       setError(null);
       setOtpCode('');
+      setVerifying(false);
+      fetch('/api/payments/config')
+        .then((r) => (r.ok ? r.json() : null))
+        .then((cfg: { mode?: 'live' | 'test' | 'sandbox' } | null) => {
+          if (cfg?.mode === 'live' || cfg?.mode === 'test' || cfg?.mode === 'sandbox') {
+            setGatewayMode(cfg.mode);
+          }
+        })
+        .catch(() => {
+          // Ignore config check errors in static fallback
+        });
     }
   }, [open]);
 
@@ -178,6 +246,71 @@ export const PlansModal: React.FC<PlansModalProps> = ({
     }
     setLatestReceipt(res.receipt);
     setStep('receipt');
+  };
+
+  const handleLaunchRazorpay = async () => {
+    if (
+      !pendingOrder ||
+      pendingOrder.provider !== 'razorpay' ||
+      !pendingOrder.razorpayKeyId ||
+      !pendingOrder.razorpayOrderId
+    ) {
+      return;
+    }
+    setError(null);
+    setVerifying(true);
+
+    const loaded = await loadRazorpayCheckoutScript();
+    if (!loaded || !window.Razorpay) {
+      setVerifying(false);
+      setError('Could not load Razorpay Checkout. Check your network connection and try again.');
+      return;
+    }
+
+    const rzp = new window.Razorpay({
+      key: pendingOrder.razorpayKeyId,
+      amount: pendingOrder.amountInr * 100,
+      currency: 'INR',
+      name: 'Caissa Chess',
+      description: `${PLAN_CATALOG[pendingOrder.plan].name} Plan (₹${pendingOrder.amountInr.toLocaleString()})`,
+      order_id: pendingOrder.razorpayOrderId,
+      prefill: authUser ? { name: authUser.username } : undefined,
+      notes: {
+        plan: pendingOrder.plan,
+        caissaOrderId: pendingOrder.orderId,
+      },
+      theme: { color: '#059669' },
+      handler: async (response) => {
+        const res = await onVerifyPayment({
+          order: pendingOrder,
+          method: 'razorpay',
+          razorpayOrderId: response.razorpay_order_id,
+          razorpayPaymentId: response.razorpay_payment_id,
+          razorpaySignature: response.razorpay_signature,
+        });
+        setVerifying(false);
+        if (!res.ok || !res.receipt) {
+          setError(res.error || 'Razorpay payment verification failed.');
+          return;
+        }
+        setLatestReceipt(res.receipt);
+        setStep('receipt');
+      },
+      modal: {
+        ondismiss: () => {
+          setVerifying(false);
+        },
+      },
+    });
+
+    rzp.on('payment.failed', (failure) => {
+      setVerifying(false);
+      setError(
+        failure?.error?.description || 'Payment did not complete in Razorpay. Please try again.'
+      );
+    });
+
+    rzp.open();
   };
 
   return (
@@ -462,157 +595,216 @@ export const PlansModal: React.FC<PlansModalProps> = ({
             </div>
 
             <div className="md:col-span-7 space-y-4">
-              <div className="space-y-2">
-                <div className="text-xs font-semibold text-stone-700 dark:text-zinc-300">
-                  Select Payment Method
-                </div>
-                <div className="grid grid-cols-3 gap-2">
-                  {(
-                    [
-                      ['upi', 'UPI / QR', Smartphone],
-                      ['netbanking', 'NetBanking', Building2],
-                      ['card', 'Card (3DS)', CreditCard],
-                    ] as const
-                  ).map(([id, label, Icon]) => (
-                    <button
-                      key={id}
-                      type="button"
-                      onClick={() => {
-                        setPayMethod(id);
-                        setError(null);
-                      }}
-                      className={`p-2.5 rounded-lg border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
-                        payMethod === id
-                          ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
-                          : 'border-stone-200 dark:border-zinc-800 text-stone-700 dark:text-zinc-300 hover:bg-stone-50 dark:hover:bg-zinc-800'
-                      }`}
-                    >
-                      <Icon className="w-3.5 h-3.5" />
-                      <span>{label}</span>
-                    </button>
-                  ))}
-                </div>
-              </div>
+              {pendingOrder.provider === 'razorpay' ? (
+                <div className="p-5 rounded-xl border border-emerald-200 dark:border-emerald-900 bg-emerald-50/40 dark:bg-emerald-950/20 space-y-4">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-sm font-bold text-stone-900 dark:text-zinc-100">
+                        Razorpay INR Checkout
+                      </span>
+                      <span className="px-2 py-0.5 rounded-md border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-zinc-900 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300">
+                        {pendingOrder.razorpayMode === 'live' ? 'Live Merchant' : 'Test Mode'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-stone-600 dark:text-zinc-300 leading-relaxed">
+                      Pay ₹{pendingOrder.amountInr.toLocaleString()} directly via UPI (GPay, PhonePe, Paytm, QR), Cards, or NetBanking through Razorpay. Funds settle into your linked Razorpay merchant account.
+                    </p>
+                  </div>
 
-              {payMethod === 'upi' && (
-                <div className="p-4 rounded-xl border border-stone-200 dark:border-zinc-800 space-y-3">
-                  <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
-                    <DeterministicQrSvg seed={`${pendingOrder.orderId}:${pendingOrder.amountInr}`} />
-                    <div className="space-y-1 text-xs">
-                      <div className="font-semibold text-stone-900 dark:text-zinc-100">
-                        Scan UPI QR or enter UPI ID
-                      </div>
-                      <p className="text-stone-500 dark:text-zinc-400">
-                        Pay ₹{pendingOrder.amountInr.toLocaleString()} using GPay, PhonePe, Paytm, or BHIM.
-                      </p>
-                      <div className="font-mono text-[11px] text-stone-500 dark:text-zinc-400">
-                        Payee: caissa.chess@upi · ₹{pendingOrder.amountInr}
-                      </div>
+                  <div className="p-3 rounded-lg bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 text-xs font-mono space-y-1">
+                    <div className="flex justify-between">
+                      <span className="text-stone-500">Razorpay Order</span>
+                      <span className="text-stone-900 dark:text-zinc-100">
+                        {pendingOrder.razorpayOrderId}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-stone-500">Amount</span>
+                      <span className="text-stone-900 dark:text-zinc-100">
+                        ₹{pendingOrder.amountInr.toLocaleString()}.00 INR
+                      </span>
                     </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1">
-                      Your UPI ID
-                    </label>
-                    <input
-                      type="text"
-                      value={upiId}
-                      onChange={(e) => {
-                        setUpiId(e.target.value);
-                        if (error) setError(null);
-                      }}
-                      placeholder="e.g. vansh@okicici"
-                      className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-sm text-stone-900 dark:text-zinc-100"
-                    />
-                  </div>
-                </div>
-              )}
 
-              {payMethod === 'netbanking' && (
-                <div className="p-4 rounded-xl border border-stone-200 dark:border-zinc-800 space-y-3">
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1">
-                      Select Bank
-                    </label>
-                    <select
-                      value={bankName}
-                      onChange={(e) => setBankName(e.target.value)}
-                      className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-sm text-stone-900 dark:text-zinc-100"
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setError(null);
+                        setStep('plans');
+                      }}
+                      className="px-4 py-2.5 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-medium text-stone-700 dark:text-zinc-300"
                     >
-                      {INDIAN_BANKS.map((b) => (
-                        <option key={b} value={b}>
-                          {b}
-                        </option>
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      disabled={verifying}
+                      onClick={handleLaunchRazorpay}
+                      className="px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Lock className="w-3.5 h-3.5" />
+                      {verifying
+                        ? 'Processing Razorpay...'
+                        : `Pay ₹${pendingOrder.amountInr.toLocaleString()} via Razorpay`}
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="space-y-2">
+                    <div className="text-xs font-semibold text-stone-700 dark:text-zinc-300">
+                      Select Payment Method
+                    </div>
+                    <div className="grid grid-cols-3 gap-2">
+                      {(
+                        [
+                          ['upi', 'UPI / QR', Smartphone],
+                          ['netbanking', 'NetBanking', Building2],
+                          ['card', 'Card (3DS)', CreditCard],
+                        ] as const
+                      ).map(([id, label, Icon]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => {
+                            setPayMethod(id);
+                            setError(null);
+                          }}
+                          className={`p-2.5 rounded-lg border text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors ${
+                            payMethod === id
+                              ? 'border-emerald-600 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
+                              : 'border-stone-200 dark:border-zinc-800 text-stone-700 dark:text-zinc-300 hover:bg-stone-50 dark:hover:bg-zinc-800'
+                          }`}
+                        >
+                          <Icon className="w-3.5 h-3.5" />
+                          <span>{label}</span>
+                        </button>
                       ))}
-                    </select>
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1">
-                      Bank Authorization OTP (4–6 digits)
-                    </label>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      maxLength={6}
-                      value={otpCode}
-                      onChange={(e) => {
-                        setOtpCode(e.target.value.replace(/\D/g, ''));
-                        if (error) setError(null);
-                      }}
-                      placeholder="Enter OTP (e.g. 123456)"
-                      className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-sm font-mono text-stone-900 dark:text-zinc-100"
-                    />
-                  </div>
-                </div>
-              )}
 
-              {payMethod === 'card' && (
-                <div className="p-4 rounded-xl border border-stone-200 dark:border-zinc-800 space-y-3">
-                  <p className="text-xs text-stone-600 dark:text-zinc-400 leading-relaxed">
-                    Card checkout uses tokenized 3-D Secure verification. Enter your 4–6 digit 3DS confirmation OTP to authorize ₹{pendingOrder.amountInr.toLocaleString()}.
-                  </p>
-                  <div>
-                    <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1">
-                      3-D Secure Confirmation OTP (4–6 digits)
-                    </label>
-                    <input
-                      type="text"
-                      inputMode="numeric"
-                      maxLength={6}
-                      value={otpCode}
-                      onChange={(e) => {
-                        setOtpCode(e.target.value.replace(/\D/g, ''));
-                        if (error) setError(null);
-                      }}
-                      placeholder="Enter 3DS OTP (e.g. 123456)"
-                      className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-sm font-mono text-stone-900 dark:text-zinc-100"
-                    />
-                  </div>
-                </div>
-              )}
+                  {payMethod === 'upi' && (
+                    <div className="p-4 rounded-xl border border-stone-200 dark:border-zinc-800 space-y-3">
+                      <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+                        <DeterministicQrSvg seed={`${pendingOrder.orderId}:${pendingOrder.amountInr}`} />
+                        <div className="space-y-1 text-xs">
+                          <div className="font-semibold text-stone-900 dark:text-zinc-100">
+                            Scan UPI QR or enter UPI ID
+                          </div>
+                          <p className="text-stone-500 dark:text-zinc-400">
+                            Pay ₹{pendingOrder.amountInr.toLocaleString()} using GPay, PhonePe, Paytm, or BHIM.
+                          </p>
+                          <div className="font-mono text-[11px] text-stone-500 dark:text-zinc-400">
+                            Sandbox Mode · ₹{pendingOrder.amountInr}
+                          </div>
+                        </div>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1">
+                          Your UPI ID
+                        </label>
+                        <input
+                          type="text"
+                          value={upiId}
+                          onChange={(e) => {
+                            setUpiId(e.target.value);
+                            if (error) setError(null);
+                          }}
+                          placeholder="e.g. vansh@okicici"
+                          className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-sm text-stone-900 dark:text-zinc-100"
+                        />
+                      </div>
+                    </div>
+                  )}
 
-              <div className="flex items-center justify-end gap-2 pt-1">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setError(null);
-                    setStep('plans');
-                  }}
-                  className="px-4 py-2.5 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-medium text-stone-700 dark:text-zinc-300"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={verifying}
-                  className="px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Lock className="w-3.5 h-3.5" />
-                  {verifying
-                    ? 'Verifying Payment...'
-                    : `Pay ₹${pendingOrder.amountInr.toLocaleString()} Now`}
-                </button>
-              </div>
+                  {payMethod === 'netbanking' && (
+                    <div className="p-4 rounded-xl border border-stone-200 dark:border-zinc-800 space-y-3">
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1">
+                          Select Bank
+                        </label>
+                        <select
+                          value={bankName}
+                          onChange={(e) => setBankName(e.target.value)}
+                          className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-sm text-stone-900 dark:text-zinc-100"
+                        >
+                          {INDIAN_BANKS.map((b) => (
+                            <option key={b} value={b}>
+                              {b}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1">
+                          Bank Authorization OTP (4–6 digits)
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          value={otpCode}
+                          onChange={(e) => {
+                            setOtpCode(e.target.value.replace(/\D/g, ''));
+                            if (error) setError(null);
+                          }}
+                          placeholder="Enter OTP (e.g. 123456)"
+                          className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-sm font-mono text-stone-900 dark:text-zinc-100"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  {payMethod === 'card' && (
+                    <div className="p-4 rounded-xl border border-stone-200 dark:border-zinc-800 space-y-3">
+                      <p className="text-xs text-stone-600 dark:text-zinc-400 leading-relaxed">
+                        Card checkout uses tokenized 3-D Secure verification. Enter your 4–6 digit 3DS confirmation OTP to authorize ₹{pendingOrder.amountInr.toLocaleString()}.
+                      </p>
+                      <div>
+                        <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1">
+                          3-D Secure Confirmation OTP (4–6 digits)
+                        </label>
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={6}
+                          value={otpCode}
+                          onChange={(e) => {
+                            setOtpCode(e.target.value.replace(/\D/g, ''));
+                            if (error) setError(null);
+                          }}
+                          placeholder="Enter 3DS OTP (e.g. 123456)"
+                          className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-sm font-mono text-stone-900 dark:text-zinc-100"
+                        />
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-end gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setError(null);
+                        setStep('plans');
+                      }}
+                      className="px-4 py-2.5 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-medium text-stone-700 dark:text-zinc-300"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={verifying}
+                      className="px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Lock className="w-3.5 h-3.5" />
+                      {verifying
+                        ? 'Verifying Payment...'
+                        : `Pay ₹${pendingOrder.amountInr.toLocaleString()} Now`}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </form>
         )}
@@ -712,9 +904,15 @@ export const PlansModal: React.FC<PlansModalProps> = ({
 
         <div className="flex flex-wrap items-center justify-between gap-3 pt-1 text-[11px] text-stone-500 dark:text-zinc-400">
           <span>
-            {authUser
-              ? `Billing synced to account "${authUser.username}". Test/sandbox checkout active until live Stripe/Razorpay keys are configured.`
-              : 'Guest checkout saves receipts in your browser. Sign in to bind paid plans to your server account.'}
+            {gatewayMode === 'live'
+              ? authUser
+                ? `Billing synced to "${authUser.username}". Razorpay Live INR merchant settlement is active.`
+                : 'Razorpay Live INR merchant settlement is active. Sign in to sync upgraded plans across devices.'
+              : gatewayMode === 'test'
+              ? 'Razorpay Test Mode active. Switch RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET to rzp_live_ keys for live rupee payouts.'
+              : authUser
+              ? `Billing synced to "${authUser.username}". Sandbox mode active until RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET are configured.`
+              : 'Sandbox mode active until RAZORPAY_KEY_ID & RAZORPAY_KEY_SECRET are set in AI Studio Secrets.'}
           </span>
           {!authUser && (
             <button
