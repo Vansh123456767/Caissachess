@@ -226,11 +226,13 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
             <label className="block text-xs font-semibold text-stone-700 dark:text-zinc-300 mb-1.5">
               Sound Theme
             </label>
-            <div className="flex gap-1.5">
+            <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
               {([
                 ['standard', 'Standard'],
-                ['wood', 'Wood Board'],
+                ['wood', 'Wood'],
                 ['futuristic', 'Synth'],
+                ['retro', 'Retro'],
+                ['shogi', 'Shogi'],
               ] as [SoundThemeId, string][]).map(([id, label]) => (
                 <button
                   key={id}
@@ -240,7 +242,7 @@ export const PreferencesModal: React.FC<PreferencesModalProps> = ({
                     soundFX.theme = id;
                     soundFX.move();
                   }}
-                  className={`flex-1 py-1.5 px-2 rounded-lg border text-xs font-medium ${
+                  className={`py-1.5 px-2 rounded-lg border text-xs font-medium ${
                     (prefs.soundTheme || 'standard') === id
                       ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-300'
                       : 'border-stone-200 dark:border-zinc-800'

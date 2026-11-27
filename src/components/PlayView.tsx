@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import confetti from 'canvas-confetti';
 import {
+  AuthUser,
   BoardState,
   ChessVariant,
   ConditionalPremove,
@@ -8,11 +10,13 @@ import {
   GameResult,
   Move,
   PieceColor,
+  PieceType,
   RatingCategory,
   UserPreferences,
   UserRatings,
 } from '../types/chess';
 import {
+  coordToSq,
   createInitialState,
   evaluateGameResult,
   exportPgn,
@@ -29,19 +33,24 @@ import {
 } from '../engine/chessEngine';
 import { findBestMove } from '../engine/aiSearch';
 import { detectOpeningFromMoves } from '../data/openings';
+import { BOSS_RUSH_STAGES, OPENING_ROULETTE_PRESETS } from '../data/wildModes';
 import { ChessBoard, QueuedPremove } from './ChessBoard';
 import { MaterialStrip } from './MaterialStrip';
 import { OtbClockView } from './OtbClockView';
+import { LiveMultiplayerBoard } from './LiveMultiplayerBoard';
 import { announceMove, soundFX } from '../utils/sound';
 import {
   ArrowLeftRight,
+  Brain,
   Check,
   Clock,
   Copy,
+  Crown,
   Download,
   Eye,
   EyeOff,
   Flag,
+  Flame,
   Handshake,
   History,
   Layers,
@@ -53,6 +62,8 @@ import {
   Plus,
   RotateCcw,
   Send,
+  Shuffle,
+  Sparkles,
   Swords,
   Trash2,
 } from 'lucide-react';
@@ -61,14 +72,20 @@ interface PlayViewProps {
   prefs: UserPreferences;
   games?: GameRecord[];
   userRatings?: UserRatings;
+  authUser?: AuthUser | null;
+  authToken?: string | null;
   initialVariant?: ChessVariant;
   initialFen?: string | null;
-  onGameCompleted: (record: GameRecord) => void;
+  initialChallengeRoomId?: string | null;
+  initialSpectateRoomId?: string | null;
+  defeatedBossIds?: string[];
+  onClearChallenge?: () => void;
+  onGameCompleted: (record: GameRecord, meta?: { isWild?: boolean; bossId?: string }) => void;
   onApplyRatingDelta?: (category: RatingCategory, delta: number) => void;
   onSendToAnalysis: (pgnOrFen: { fen?: string; moves?: Move[]; fens?: string[]; variant: ChessVariant }) => void;
 }
 
-type PlaySubTab = 'quick' | 'variants' | 'correspondence' | 'simul' | 'clock';
+type PlaySubTab = 'quick' | 'live' | 'variants' | 'boss' | 'correspondence' | 'simul' | 'clock';
 
 interface HandicapPreset {
   id: 'none' | 'pawn' | 'knight' | 'rook' | 'queen';
@@ -133,13 +150,41 @@ export const PlayView: React.FC<PlayViewProps> = ({
   prefs,
   games = [],
   userRatings,
+  authUser = null,
+  authToken = null,
   initialVariant = 'standard',
   initialFen = null,
+  initialChallengeRoomId = null,
+  initialSpectateRoomId = null,
+  defeatedBossIds = [],
+  onClearChallenge,
   onGameCompleted,
   onApplyRatingDelta,
   onSendToAnalysis,
 }) => {
-  const [subTab, setSubTab] = useState<PlaySubTab>(initialVariant !== 'standard' ? 'variants' : 'quick');
+  const [subTab, setSubTab] = useState<PlaySubTab>(
+    initialChallengeRoomId || initialSpectateRoomId
+      ? 'live'
+      : initialVariant !== 'standard'
+      ? 'variants'
+      : 'quick'
+  );
+
+  // Wild Modes & Boss Rush State
+  const [fogOfWar, setFogOfWar] = useState<boolean>(false);
+  const [duckChess, setDuckChess] = useState<boolean>(false);
+  const [handAndBrain, setHandAndBrain] = useState<boolean>(false);
+  const [duckSquare, setDuckSquare] = useState<string | null>(null);
+  const [awaitingDuckPlacement, setAwaitingDuckPlacement] = useState<boolean>(false);
+  const [brainPieceCall, setBrainPieceCall] = useState<PieceType | null>(null);
+  const [activeBossId, setActiveBossId] = useState<string | null>(null);
+  const [finisherBanner, setFinisherBanner] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (initialChallengeRoomId || initialSpectateRoomId) {
+      setSubTab('live');
+    }
+  }, [initialChallengeRoomId, initialSpectateRoomId]);
 
   // Quick / Variant Game Config
   const [selectedVariant, setSelectedVariant] = useState<ChessVariant>(initialVariant);
@@ -251,7 +296,7 @@ export const PlayView: React.FC<PlayViewProps> = ({
   const startNewGame = (
     variantOverride?: ChessVariant,
     forceColor?: PieceColor,
-    customSeek?: { tcId?: string; skill?: number; rated?: boolean; label?: string; fenOverride?: string }
+    customSeek?: { tcId?: string; skill?: number; rated?: boolean; label?: string; fenOverride?: string; bossId?: string }
   ) => {
     const v = variantOverride || selectedVariant;
     const tc = customSeek?.tcId
@@ -298,6 +343,11 @@ export const PlayView: React.FC<PlayViewProps> = ({
       },
     ]);
     lowTimeWarnedRef.current = { w: false, b: false };
+    setActiveBossId(customSeek?.bossId || null);
+    setFinisherBanner(null);
+    setDuckSquare(null);
+    setAwaitingDuckPlacement(false);
+    setBrainPieceCall(null);
     setUserColor(chosenColor);
     setFlipped(chosenColor === 'b');
     setClocks({ w: tc.baseSeconds, b: tc.baseSeconds });
@@ -356,12 +406,45 @@ export const PlayView: React.FC<PlayViewProps> = ({
       openingName: opening.name,
       userColor: opponentMode === 'ai' ? userColor : undefined,
     };
-    onGameCompleted(record);
+    const hasWild = fogOfWar || duckChess || handAndBrain;
+    if (res.winner === userColor && res.status === 'checkmate') {
+      const lastMv = finalMoves[finalMoves.length - 1];
+      const banner =
+        lastMv?.san?.includes('Q')
+          ? 'Royal Queen Checkmate Finish!'
+          : activeBossId
+          ? 'Boss Defeated by Checkmate!'
+          : 'Checkmate Victory!';
+      setFinisherBanner(banner);
+      confetti({
+        particleCount: 85,
+        spread: 80,
+        origin: { y: 0.55 },
+        disableForReducedMotion: true,
+        colors: ['#10b981', '#f59e0b', '#fbbf24', '#38bdf8', '#a855f7'],
+      });
+    }
+    onGameCompleted(record, { isWild: hasWild, bossId: activeBossId || undefined });
     setSavedNotice(true);
+  };
+
+  const pickRandomDuckSquare = (st: BoardState, currentDuck: string | null): string | null => {
+    const empties: string[] = [];
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        if (!st.board[r][c]) {
+          const sq = coordToSq(r, c);
+          if (sq !== currentDuck) empties.push(sq);
+        }
+      }
+    }
+    if (empties.length === 0) return currentDuck;
+    return empties[Math.floor(Math.random() * empties.length)];
   };
 
   const applyPlayerOrAiMove = (mv: Move) => {
     if (gameResult) return;
+    if (duckChess && awaitingDuckPlacement) return;
     const res = makeMove(boardState, mv);
     const committedMove: Move = { ...mv, san: res.san, uci: res.uci };
     const nextMoves = [...moves, committedMove];
@@ -388,16 +471,83 @@ export const PlayView: React.FC<PlayViewProps> = ({
     setFens(nextFens);
     setPosKeys(nextKeys);
     setViewPly(null);
+    setBrainPieceCall(null);
 
     const terminal = evaluateGameResult(res.next, nextKeys);
     if (terminal) {
+      setAwaitingDuckPlacement(false);
       finishAndRecordGame(terminal, nextMoves, nextFens);
+      return;
+    }
+
+    if (duckChess) {
+      if (opponentMode === 'local' || mv.color === userColor) {
+        setAwaitingDuckPlacement(true);
+      } else {
+        setDuckSquare((prev) => pickRandomDuckSquare(res.next, prev));
+      }
     }
   };
 
+  // Hand & Brain caller effect when it becomes the user's turn
+  useEffect(() => {
+    if (!handAndBrain || !gameActive || gameResult || awaitingDuckPlacement) {
+      setBrainPieceCall(null);
+      return;
+    }
+    if (opponentMode === 'ai' && boardState.turn !== userColor) return;
+    const legal = getLegalMoves(boardState).filter(
+      (m) => !duckSquare || coordToSq(m.to[0], m.to[1]) !== duckSquare
+    );
+    if (legal.length === 0) return;
+    const best = findBestMove(boardState, 3);
+    const chosen =
+      best.move && legal.some((m) => m.piece === best.move!.piece)
+        ? best.move.piece
+        : legal[0].piece;
+    setBrainPieceCall(chosen);
+  }, [handAndBrain, gameActive, gameResult, boardState, userColor, opponentMode, awaitingDuckPlacement, duckSquare]);
+
+  // Fog of War visibility set (own occupied squares + all legal move targets)
+  const fogVisibleSquares = useMemo(() => {
+    if (!fogOfWar || !gameActive) return null;
+    const vis = new Set<string>();
+    const perspective: PieceColor = opponentMode === 'local' ? boardState.turn : userColor;
+    for (let r = 0; r < 8; r++) {
+      for (let c = 0; c < 8; c++) {
+        if (boardState.board[r][c]?.color === perspective) {
+          vis.add(coordToSq(r, c));
+        }
+      }
+    }
+    if (boardState.turn === perspective) {
+      for (const m of getLegalMoves(boardState)) {
+        vis.add(coordToSq(m.to[0], m.to[1]));
+      }
+    } else {
+      // Show immediate adjacent squares around own king & pawns even off-turn
+      for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+          if (boardState.board[r][c]?.color === perspective) {
+            for (let dr = -1; dr <= 1; dr++) {
+              for (let dc = -1; dc <= 1; dc++) {
+                const nr = r + dr;
+                const nc = c + dc;
+                if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
+                  vis.add(coordToSq(nr, nc));
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    return vis;
+  }, [fogOfWar, gameActive, boardState, userColor, opponentMode]);
+
   // AI Turn Effect
   useEffect(() => {
-    if (!gameActive || gameResult || opponentMode !== 'ai') return;
+    if (!gameActive || gameResult || opponentMode !== 'ai' || awaitingDuckPlacement) return;
     if (boardState.turn === userColor) return;
 
     setAiThinking(true);
@@ -405,13 +555,20 @@ export const PlayView: React.FC<PlayViewProps> = ({
       const { move } = findBestMove(boardState, skillLevel);
       setAiThinking(false);
       if (move) {
-        applyPlayerOrAiMove(move);
+        if (duckSquare && coordToSq(move.to[0], move.to[1]) === duckSquare) {
+          const alt = getLegalMoves(boardState).find(
+            (m) => coordToSq(m.to[0], m.to[1]) !== duckSquare
+          );
+          if (alt) applyPlayerOrAiMove(alt);
+        } else {
+          applyPlayerOrAiMove(move);
+        }
       }
     }, 320);
 
     return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [gameActive, boardState, gameResult, opponentMode, userColor, skillLevel]);
+  }, [gameActive, boardState, gameResult, opponentMode, userColor, skillLevel, awaitingDuckPlacement, duckSquare]);
 
   // Execute queued multi-premove immediately when it becomes the user's turn
   useEffect(() => {
@@ -835,10 +992,12 @@ export const PlayView: React.FC<PlayViewProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-4 border-b border-stone-200 dark:border-zinc-800 pb-3">
         <div className="flex items-center gap-1 p-1 bg-stone-100 dark:bg-zinc-900 rounded-lg overflow-x-auto">
           {([
-            ['quick', 'Quick Match & Lobby'],
+            ['quick', 'Quick Match & Wild'],
+            ['live', 'Live 1v1 & Friends'],
             ['variants', '8 Variants'],
+            ['boss', 'Boss Rush'],
             ['correspondence', 'Correspondence'],
-            ['simul', 'Simultaneous Exhibition'],
+            ['simul', 'Simul'],
             ['clock', 'OTB Clock'],
           ] as [PlaySubTab, string][]).map(([id, label]) => (
             <button
@@ -870,6 +1029,92 @@ export const PlayView: React.FC<PlayViewProps> = ({
           <span>{isRated && opponentMode === 'ai' ? 'Rated' : 'Casual'}</span>
         </div>
       </div>
+
+      {/* ==================== LIVE 1v1 MULTIPLAYER & CHALLENGE ROOMS ==================== */}
+      {subTab === 'live' && (
+        <LiveMultiplayerBoard
+          prefs={prefs}
+          authUser={authUser}
+          authToken={authToken}
+          initialChallengeRoomId={initialChallengeRoomId}
+          initialSpectateRoomId={initialSpectateRoomId}
+          onClearExternalRoom={onClearChallenge}
+          onGameCompleted={(rec) => onGameCompleted(rec)}
+        />
+      )}
+
+      {/* ==================== BOSS RUSH LADDER ==================== */}
+      {subTab === 'boss' && (
+        <div className="space-y-4">
+          <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
+            <div>
+              <h2 className="text-base font-bold text-stone-900 dark:text-zinc-100 flex items-center gap-2">
+                <Flame className="w-4 h-4 text-amber-500" />
+                Boss Rush Ladder ({defeatedBossIds.length}/{BOSS_RUSH_STAGES.length} Defeated)
+              </h2>
+              <p className="text-xs text-stone-500 dark:text-zinc-400 mt-0.5">
+                Conquer all 4 escalating bosses to unlock the Boss Slayer & Grandmaster Apex trophies!
+              </p>
+            </div>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {BOSS_RUSH_STAGES.map((boss) => {
+              const beaten = defeatedBossIds.includes(boss.id);
+              return (
+                <div
+                  key={boss.id}
+                  className={`p-5 rounded-xl border space-y-3 ${
+                    beaten
+                      ? 'border-emerald-500/60 bg-emerald-50/40 dark:bg-emerald-950/20'
+                      : 'border-stone-200 dark:border-zinc-800 bg-white dark:bg-zinc-900'
+                  }`}
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div>
+                      <div className="text-xs font-mono uppercase tracking-wider text-amber-600 dark:text-amber-400">
+                        {boss.title} · {boss.elo} Elo
+                      </div>
+                      <h3 className="text-base font-bold text-stone-900 dark:text-zinc-100">
+                        {boss.name}
+                      </h3>
+                    </div>
+                    {beaten && (
+                      <span className="text-xs font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-1">
+                        <Crown className="w-3.5 h-3.5" />
+                        Defeated
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-stone-600 dark:text-zinc-400">{boss.personality}</p>
+                  <div className="flex items-center justify-between pt-1">
+                    <span className="text-[11px] font-medium text-stone-500">
+                      Reward: {boss.rewardBadge}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSubTab('quick');
+                        startNewGame('standard', 'w', {
+                          tcId: '5+3',
+                          skill: boss.skillLevel,
+                          rated: false,
+                          label: boss.name,
+                          fenOverride: boss.startFen,
+                          bossId: boss.id,
+                        });
+                      }}
+                      className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5"
+                    >
+                      <Swords className="w-3.5 h-3.5" />
+                      {beaten ? 'Rematch Boss' : 'Fight Boss'}
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       {/* ==================== OTB CHESS CLOCK ==================== */}
       {subTab === 'clock' && <OtbClockView />}
@@ -921,6 +1166,25 @@ export const PlayView: React.FC<PlayViewProps> = ({
               </div>
             </div>
 
+            {/* Wild Mode Status Prompt Banners */}
+            {gameActive && !gameResult && awaitingDuckPlacement && (
+              <div className="w-full max-w-[540px] px-3 py-2 rounded-lg bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-700 text-xs font-semibold text-amber-900 dark:text-amber-200 flex items-center justify-between">
+                <span>Duck Chess: Click any empty square to place the Duck blocker!</span>
+                <span className="font-mono">Duck: {duckSquare || 'None'}</span>
+              </div>
+            )}
+            {gameActive && !gameResult && handAndBrain && brainPieceCall && !awaitingDuckPlacement && (
+              <div className="w-full max-w-[540px] px-3 py-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-300 dark:border-emerald-700 text-xs font-semibold text-emerald-900 dark:text-emerald-200 flex items-center gap-2">
+                <Brain className="w-4 h-4 text-emerald-600 shrink-0" />
+                <span>
+                  Brain says: Move a{' '}
+                  <strong className="uppercase">
+                    {({ p: 'Pawn', n: 'Knight', b: 'Bishop', r: 'Rook', q: 'Queen', k: 'King' } as Record<PieceType, string>)[brainPieceCall]}
+                  </strong>
+                </span>
+              </div>
+            )}
+
             <ChessBoard
               state={displayedState}
               onMove={viewPly === null ? applyPlayerOrAiMove : undefined}
@@ -940,6 +1204,15 @@ export const PlayView: React.FC<PlayViewProps> = ({
               premoveQueue={opponentMode === 'ai' ? premoveQueue : []}
               onPremoveQueueChange={opponentMode === 'ai' ? setPremoveQueue : undefined}
               lastMove={activeLastMove}
+              fogVisibleSquares={fogVisibleSquares}
+              duckSquare={duckChess ? duckSquare : null}
+              awaitingDuckPlacement={awaitingDuckPlacement}
+              onDuckPlace={(sq) => {
+                setDuckSquare(sq);
+                setAwaitingDuckPlacement(false);
+                soundFX.move();
+              }}
+              restrictedPieceType={handAndBrain ? brainPieceCall : null}
             />
 
             {premoveQueue.length > 0 && (
@@ -1366,6 +1639,88 @@ export const PlayView: React.FC<PlayViewProps> = ({
                 )}
               </div>
 
+              {/* Wild Modes + Opening Roulette */}
+              <div className="pt-2 border-t border-stone-100 dark:border-zinc-800 space-y-2.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-semibold text-stone-700 dark:text-zinc-300 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                    Wild Modifiers & Opening Roulette
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const pick =
+                        OPENING_ROULETTE_PRESETS[
+                          Math.floor(Math.random() * OPENING_ROULETTE_PRESETS.length)
+                        ];
+                      startNewGame('standard', undefined, {
+                        label: `Roulette: ${pick.name}`,
+                        fenOverride: pick.fen,
+                        rated: false,
+                      });
+                    }}
+                    className="text-[11px] font-semibold text-emerald-600 dark:text-emerald-400 hover:underline flex items-center gap-1"
+                  >
+                    <Shuffle className="w-3 h-3" />
+                    Random Gambit
+                  </button>
+                </div>
+                <div className="grid grid-cols-3 gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setFogOfWar((v) => !v)}
+                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-semibold ${
+                      fogOfWar
+                        ? 'border-emerald-600 bg-emerald-600 text-white'
+                        : 'border-stone-200 dark:border-zinc-800 text-stone-700 dark:text-zinc-300'
+                    }`}
+                  >
+                    Fog of War
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDuckChess((v) => !v)}
+                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-semibold ${
+                      duckChess
+                        ? 'border-amber-500 bg-amber-500 text-white'
+                        : 'border-stone-200 dark:border-zinc-800 text-stone-700 dark:text-zinc-300'
+                    }`}
+                  >
+                    Duck Chess
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setHandAndBrain((v) => !v)}
+                    className={`py-1.5 px-2 rounded-lg border text-[11px] font-semibold ${
+                      handAndBrain
+                        ? 'border-emerald-600 bg-emerald-600 text-white'
+                        : 'border-stone-200 dark:border-zinc-800 text-stone-700 dark:text-zinc-300'
+                    }`}
+                  >
+                    Hand & Brain
+                  </button>
+                </div>
+                <div className="flex flex-wrap gap-1">
+                  {OPENING_ROULETTE_PRESETS.slice(0, 4).map((op) => (
+                    <button
+                      key={op.id}
+                      type="button"
+                      onClick={() =>
+                        startNewGame('standard', undefined, {
+                          label: op.name,
+                          fenOverride: op.fen,
+                          rated: false,
+                        })
+                      }
+                      className="px-2 py-0.5 rounded border border-stone-200 dark:border-zinc-800 text-[10px] font-medium text-stone-600 dark:text-zinc-400 hover:border-emerald-500"
+                      title={op.tagline}
+                    >
+                      {op.eco} · {op.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
               <button
                 type="button"
                 onClick={() => startNewGame()}
@@ -1543,6 +1898,12 @@ export const PlayView: React.FC<PlayViewProps> = ({
             {/* Game Result Banner */}
             {gameResult && (
               <div className="bg-stone-100 dark:bg-zinc-900 border border-stone-300 dark:border-zinc-700 rounded-xl p-4 space-y-3">
+                {finisherBanner && (
+                  <div className="px-3 py-1.5 rounded-lg bg-gradient-to-r from-amber-500/20 to-emerald-500/20 border border-amber-400/60 text-xs font-bold text-amber-900 dark:text-amber-200 flex items-center gap-1.5">
+                    <Sparkles className="w-4 h-4 text-amber-500" />
+                    {finisherBanner}
+                  </div>
+                )}
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <div className="text-sm font-bold text-stone-900 dark:text-zinc-100">

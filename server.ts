@@ -2,9 +2,11 @@ import express from 'express';
 import type { NextFunction, Request, Response } from 'express';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
+import { WebSocketServer, WebSocket } from 'ws';
 import {
   CURATED_PUZZLES,
   getPuzzleDifficulty,
@@ -19,6 +21,15 @@ import {
   type DailyQuotaUsage,
   type PlanTier,
 } from './src/data/plans.ts';
+import {
+  createInitialState,
+  evaluateGameResult,
+  makeMove,
+  parseFen,
+  toFen,
+  uciToMove,
+} from './src/engine/chessEngine.ts';
+import type { BoardState, ChessVariant, Move, PieceColor } from './src/types/chess.ts';
 import { isBotAccount } from './src/utils/botFilter.ts';
 
 dotenv.config();
@@ -46,6 +57,7 @@ interface StoredUser {
   createdAt: string;
   plan?: PlanTier;
   quota?: DailyQuotaUsage;
+  isBot?: boolean;
 }
 
 interface StoredTournamentPlayer {
@@ -92,10 +104,69 @@ interface StoredPaymentOrder {
   paidAt?: string;
 }
 
+interface StoredLeaderboardVisitor {
+  id: string;
+  username: string;
+  usernameLower: string;
+  ratings: {
+    bullet: number;
+    blitz: number;
+    rapid: number;
+    classical: number;
+    chess960: number;
+  };
+  isBot: boolean;
+  lastSeenAt: string;
+}
+
+interface StoredGlobalTournamentChatMessage {
+  id: string;
+  author: string;
+  isGuest: boolean;
+  tournamentTag?: string;
+  text: string;
+  createdAt: string;
+}
+
+interface StoredCustomPuzzle {
+  id: string;
+  title: string;
+  rating: number;
+  themes: string[];
+  fen: string;
+  solutionUci: string[];
+  playerColor: PieceColor;
+  author: string;
+  createdAt: string;
+}
+
+interface StoredClub {
+  id: string;
+  name: string;
+  description: string;
+  createdBy: string;
+  members: string[];
+  totalScore: number;
+}
+
+interface StoredHallOfFameEntry {
+  id: string;
+  tournamentId: string;
+  tournamentName: string;
+  format: 'arena' | 'swiss' | 'knockout';
+  completedAt: string;
+  podium: { rank: 1 | 2 | 3; name: string; isGuest?: boolean; score: number }[];
+}
+
 interface StoreData {
   users: StoredUser[];
+  visitors: StoredLeaderboardVisitor[];
   tournaments: StoredTournament[];
   payments: StoredPaymentOrder[];
+  tournamentGlobalChat: StoredGlobalTournamentChatMessage[];
+  customPuzzles: StoredCustomPuzzle[];
+  clubs: StoredClub[];
+  hallOfFame: StoredHallOfFameEntry[];
 }
 
 const VALID_VARIANTS = new Set([
@@ -122,13 +193,7 @@ function createDefaultTournaments(): StoredTournament[] {
       currentRound: 1,
       status: 'active',
       createdBy: 'Caissa Club',
-      players: [
-        { id: 'p1', name: 'GM_Aurelia', rating: 2480, score: 14, streak: 3, gamesPlayed: 5 },
-        { id: 'p2', name: 'Marcus_960', rating: 1945, score: 10, streak: 2, gamesPlayed: 5 },
-        { id: 'p3', name: 'Elena_Tactics', rating: 1780, score: 8, streak: 0, gamesPlayed: 4 },
-        { id: 'p4', name: 'Viktor_Rapid', rating: 1620, score: 5, streak: 1, gamesPlayed: 4 },
-        { id: 'p5', name: 'Aria_Club', rating: 1440, score: 3, streak: 0, gamesPlayed: 4 },
-      ],
+      players: [],
     },
     {
       id: 'arena-crazyhouse',
@@ -139,12 +204,8 @@ function createDefaultTournaments(): StoredTournament[] {
       durationMinutes: 60,
       currentRound: 1,
       status: 'active',
-      createdBy: 'EightVariants',
-      players: [
-        { id: 'c1', name: 'DropMaster', rating: 2110, score: 12, streak: 2, gamesPlayed: 4 },
-        { id: 'c2', name: 'EightVariants', rating: 1890, score: 9, streak: 1, gamesPlayed: 4 },
-        { id: 'c3', name: 'PocketRook', rating: 1650, score: 4, streak: 0, gamesPlayed: 3 },
-      ],
+      createdBy: 'Caissa Club',
+      players: [],
     },
     {
       id: 'swiss-open',
@@ -156,13 +217,36 @@ function createDefaultTournaments(): StoredTournament[] {
       currentRound: 1,
       status: 'active',
       createdBy: 'Caissa Club',
-      players: [
-        { id: 's1', name: 'IM_Soren', rating: 2350, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: 's2', name: 'Nadia_K', rating: 1740, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: 's3', name: 'Theo_Endgame', rating: 1860, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: 's4', name: 'ClaraV', rating: 1580, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: 's5', name: 'Henrik_FM', rating: 2190, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-      ],
+      players: [],
+    },
+  ];
+}
+
+function createDefaultClubs(): StoredClub[] {
+  return [
+    {
+      id: 'club-vanguard',
+      name: 'Caissa Vanguard',
+      description: 'Daily arena grinders, open tactical study, and team battles.',
+      createdBy: 'Caissa Club',
+      members: ['Caissa Club'],
+      totalScore: 420,
+    },
+    {
+      id: 'club-gambit',
+      name: 'Gambit Syndicate',
+      description: 'Romantic sharp openings, King’s Gambit, and Crazyhouse brawls.',
+      createdBy: 'Caissa Club',
+      members: ['Caissa Club'],
+      totalScore: 365,
+    },
+    {
+      id: 'club-endgame',
+      name: 'Endgame Architects',
+      description: 'Classical endgame precision, rook endings, and tournament prep.',
+      createdBy: 'Caissa Club',
+      members: ['Caissa Club'],
+      totalScore: 310,
     },
   ];
 }
@@ -175,22 +259,59 @@ function loadStore(): StoreData {
     if (fs.existsSync(STORE_FILE)) {
       const raw = fs.readFileSync(STORE_FILE, 'utf8');
       const parsed = JSON.parse(raw) as Partial<StoreData>;
-      return {
-        users: Array.isArray(parsed.users) ? parsed.users : [],
-        tournaments:
-          Array.isArray(parsed.tournaments) && parsed.tournaments.length > 0
-            ? parsed.tournaments
-            : createDefaultTournaments(),
+      const users = Array.isArray(parsed.users) ? parsed.users : [];
+      const botUserIds = new Set(
+        users
+          .filter((u) => u.isBot === true || isBotAccount({ username: u.username }))
+          .map((u) => u.id)
+      );
+      const rawTournaments =
+        Array.isArray(parsed.tournaments) && parsed.tournaments.length > 0
+          ? parsed.tournaments
+          : createDefaultTournaments();
+      let strippedLegacyBots = false;
+      const tournaments = rawTournaments.map((t) => {
+        const beforeCount = Array.isArray(t.players) ? t.players.length : 0;
+        const cleanPlayers = (Array.isArray(t.players) ? t.players : []).filter(
+          (p) => Boolean(p.userId) && !isBotAccount(p) && !botUserIds.has(p.userId!)
+        );
+        if (cleanPlayers.length !== beforeCount) {
+          strippedLegacyBots = true;
+        }
+        return { ...t, players: cleanPlayers };
+      });
+      const data: StoreData = {
+        users,
+        visitors: Array.isArray(parsed.visitors) ? parsed.visitors : [],
+        tournaments,
         payments: Array.isArray(parsed.payments) ? parsed.payments : [],
+        tournamentGlobalChat: Array.isArray(parsed.tournamentGlobalChat)
+          ? parsed.tournamentGlobalChat.slice(-250)
+          : [],
+        customPuzzles: Array.isArray(parsed.customPuzzles) ? parsed.customPuzzles : [],
+        clubs:
+          Array.isArray(parsed.clubs) && parsed.clubs.length > 0
+            ? parsed.clubs
+            : createDefaultClubs(),
+        hallOfFame: Array.isArray(parsed.hallOfFame) ? parsed.hallOfFame.slice(0, 50) : [],
       };
+      if (strippedLegacyBots) {
+        saveStore(data);
+      }
+      return data;
     }
   } catch {
     // Fallback to clean seeded store
   }
   const initial: StoreData = {
     users: [],
+    visitors: [],
     tournaments: createDefaultTournaments(),
     payments: [],
+    tournamentGlobalChat: [],
+    customPuzzles: [],
+    clubs: createDefaultClubs(),
+    hallOfFame: [],
   };
   saveStore(initial);
   return initial;
@@ -304,6 +425,7 @@ function toPublicUser(u: StoredUser) {
     createdAt: u.createdAt,
     plan,
     quota,
+    isBot: Boolean(u.isBot || isBotAccount({ username: u.username })),
   };
 }
 
@@ -352,7 +474,14 @@ function checkAuthRateLimit(req: Request, res: Response): boolean {
 }
 
 function formatTournamentForClient(t: StoredTournament, userId?: string) {
-  const humanPlayers = t.players.filter((p) => !isBotAccount(p));
+  const botUserIds = new Set(
+    store.users
+      .filter((u) => u.isBot === true || isBotAccount({ username: u.username }))
+      .map((u) => u.id)
+  );
+  const humanPlayers = t.players.filter(
+    (p) => Boolean(p.userId) && !isBotAccount(p) && !botUserIds.has(p.userId!)
+  );
   const joined = userId ? humanPlayers.some((p) => p.userId === userId) : false;
   return {
     id: t.id,
@@ -421,17 +550,30 @@ async function startServer() {
       return;
     }
 
+    const claimBlitz = Number(req.body?.claimRatings?.blitz);
+    const claimedRating =
+      Number.isFinite(claimBlitz) && claimBlitz >= 400 && claimBlitz <= 3500
+        ? Math.round(claimBlitz)
+        : 1620;
+
+    const rawVisitorId = typeof req.body?.visitorId === 'string' ? req.body.visitorId.trim() : '';
+    const validVisitorId = /^[a-zA-Z0-9_-]{8,64}$/.test(rawVisitorId) ? rawVisitorId : '';
+
     const user: StoredUser = {
       id: `usr-${crypto.randomUUID()}`,
       username: rawUsername,
       usernameLower: lower,
       passwordHash: hashPassword(rawPassword),
-      rating: 1620,
+      rating: claimedRating,
       createdAt: new Date().toISOString(),
       plan: 'free',
       quota: { date: getTodayQuotaDate(), analysisUsed: 0, puzzlesUsed: 0 },
+      isBot: isBotAccount({ username: rawUsername, isBot: Boolean(req.body?.isBot) }),
     };
     store.users.push(user);
+    if (validVisitorId) {
+      store.visitors = store.visitors.filter((v) => v.id !== validVisitorId);
+    }
     saveStore(store);
 
     const token = signToken(user);
@@ -1037,6 +1179,152 @@ async function startServer() {
     res.json({ puzzles: filtered, counts, difficulty, sort });
   });
 
+  // ==================== HUMAN-ONLY LEADERBOARD & BOT STATUS ====================
+  function clampLeaderboardRating(val: unknown, fallback = 1620): number {
+    const n = Number(val);
+    if (!Number.isFinite(n)) return fallback;
+    return Math.max(400, Math.min(3500, Math.round(n)));
+  }
+
+  app.post('/api/account/bot', requireAuth, (req: AuthedRequest, res: Response) => {
+    const user = req.authUser!;
+    const requestedBot = Boolean(req.body?.isBot);
+    const effectiveBot = requestedBot || isBotAccount({ username: user.username });
+    user.isBot = effectiveBot;
+    if (effectiveBot) {
+      for (const t of store.tournaments) {
+        t.players = t.players.filter((p) => p.userId !== user.id);
+      }
+    }
+    saveStore(store);
+    res.json({ user: toPublicUser(user) });
+  });
+
+  app.post('/api/leaderboard/checkin', (req: Request, res: Response) => {
+    const auth = resolveOptionalAuth(req, res);
+    if (!auth.ok) return;
+
+    const rawVisitorId = typeof req.body?.visitorId === 'string' ? req.body.visitorId.trim() : '';
+    const validVisitorId = /^[a-zA-Z0-9_-]{8,64}$/.test(rawVisitorId) ? rawVisitorId : '';
+
+    const rawRatings =
+      req.body?.ratings && typeof req.body.ratings === 'object' ? req.body.ratings : {};
+    const ratings = {
+      bullet: clampLeaderboardRating(rawRatings.bullet, 1540),
+      blitz: clampLeaderboardRating(rawRatings.blitz, 1620),
+      rapid: clampLeaderboardRating(rawRatings.rapid, 1685),
+      classical: clampLeaderboardRating(rawRatings.classical, 1710),
+      chess960: clampLeaderboardRating(rawRatings.chess960, 1590),
+    };
+    const isBot =
+      Boolean(req.body?.isBot) ||
+      (auth.user ? isBotAccount({ username: auth.user.username }) : false);
+
+    if (auth.user) {
+      auth.user.rating = ratings.blitz;
+      auth.user.isBot = isBot || Boolean(auth.user.isBot);
+      if (validVisitorId) {
+        store.visitors = store.visitors.filter((v) => v.id !== validVisitorId);
+      }
+      saveStore(store);
+      res.json({ ok: true });
+      return;
+    }
+
+    if (!validVisitorId) {
+      res.status(400).json({ error: 'Valid visitorId is required.' });
+      return;
+    }
+
+    if (isBot) {
+      store.visitors = store.visitors.filter((v) => v.id !== validVisitorId);
+      saveStore(store);
+      res.json({ ok: true, excludedAsBot: true });
+      return;
+    }
+
+    const displayName = 'Anonymous';
+    const now = new Date().toISOString();
+    const existing = store.visitors.find((v) => v.id === validVisitorId);
+    if (existing) {
+      existing.username = displayName;
+      existing.usernameLower = 'anonymous';
+      existing.ratings = ratings;
+      existing.isBot = false;
+      existing.lastSeenAt = now;
+    } else {
+      store.visitors.push({
+        id: validVisitorId,
+        username: displayName,
+        usernameLower: 'anonymous',
+        ratings,
+        isBot: false,
+        lastSeenAt: now,
+      });
+    }
+    saveStore(store);
+    res.json({ ok: true });
+  });
+
+  app.get('/api/leaderboard', (req: Request, res: Response) => {
+    const rawCategory = typeof req.query.category === 'string' ? req.query.category : 'blitz';
+    const category =
+      rawCategory === 'bullet' ||
+      rawCategory === 'blitz' ||
+      rawCategory === 'rapid' ||
+      rawCategory === 'classical' ||
+      rawCategory === 'chess960'
+        ? rawCategory
+        : 'blitz';
+    const includeBots = req.query.includeBots === '1' || req.query.includeBots === 'true';
+
+    const categoryOffset: Record<string, number> = {
+      bullet: -80,
+      blitz: 0,
+      rapid: 65,
+      classical: 90,
+      chess960: -30,
+    };
+
+    const userEntries = store.users
+      .filter((u) => {
+        const bot = Boolean(u.isBot) || isBotAccount({ username: u.username });
+        return includeBots ? true : !bot;
+      })
+      .map((u) => {
+        const bot = Boolean(u.isBot) || isBotAccount({ username: u.username });
+        return {
+          id: u.id,
+          username: u.username,
+          rating: Math.max(400, u.rating + (categoryOffset[category] || 0)),
+          isBot: bot,
+          source: 'account' as const,
+        };
+      });
+
+    const accountNames = new Set(userEntries.map((u) => u.username.toLowerCase()));
+
+    const visitorEntries = store.visitors
+      .filter(
+        (v) =>
+          !v.isBot &&
+          !isBotAccount({ username: v.username }) &&
+          (v.usernameLower === 'anonymous' ||
+            v.username === 'CaissaPlayer' ||
+            !accountNames.has(v.usernameLower))
+      )
+      .map((v) => ({
+        id: v.id,
+        username: 'Anonymous',
+        rating: v.ratings?.[category] ?? 1620,
+        isBot: false,
+        source: 'visitor' as const,
+      }));
+
+    const players = [...userEntries, ...visitorEntries].sort((a, b) => b.rating - a.rating);
+    res.json({ players, total: players.length });
+  });
+
   // ==================== TOURNAMENTS API ====================
   app.get('/api/tournaments', (req: Request, res: Response) => {
     const token = extractBearer(req);
@@ -1072,6 +1360,7 @@ async function startServer() {
         ? Math.max(3, Math.min(9, Number(req.body?.totalRounds) || 5))
         : undefined;
 
+    const isCreatorBot = Boolean(user.isBot || isBotAccount({ username: user.username }));
     const name = rawName || `${user.username}'s ${format === 'arena' ? 'Arena' : 'Swiss'}`;
     const created: StoredTournament = {
       id: `tour-${crypto.randomUUID().slice(0, 8)}`,
@@ -1085,21 +1374,20 @@ async function startServer() {
       status: 'active',
       ownerId: user.id,
       createdBy: user.username,
-      players: [
-        {
-          id: `pl-${user.id}`,
-          name: user.username,
-          rating: user.rating,
-          score: 0,
-          streak: 0,
-          gamesPlayed: 0,
-          buchholz: 0,
-          userId: user.id,
-        },
-        { id: `b1-${Date.now()}`, name: 'Elena_Tactics', rating: 1780, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: `b2-${Date.now()}`, name: 'Marcus_960', rating: 1945, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: `b3-${Date.now()}`, name: 'Aria_Club', rating: 1440, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-      ],
+      players: isCreatorBot
+        ? []
+        : [
+            {
+              id: `pl-${user.id}`,
+              name: user.username,
+              rating: user.rating,
+              score: 0,
+              streak: 0,
+              gamesPlayed: 0,
+              buchholz: 0,
+              userId: user.id,
+            },
+          ],
     };
 
     store.tournaments.unshift(created);
@@ -1109,7 +1397,7 @@ async function startServer() {
 
   app.post('/api/tournaments/:id/join', requireAuth, (req: AuthedRequest, res: Response) => {
     const user = req.authUser!;
-    if (isBotAccount({ username: user.username })) {
+    if (user.isBot || isBotAccount({ username: user.username })) {
       res.status(403).json({ error: 'Bots are not allowed in tournament leaderboards.' });
       return;
     }
@@ -1140,7 +1428,7 @@ async function startServer() {
 
   app.post('/api/tournaments/:id/result', requireAuth, (req: AuthedRequest, res: Response) => {
     const user = req.authUser!;
-    if (isBotAccount({ username: user.username })) {
+    if (user.isBot || isBotAccount({ username: user.username })) {
       res.status(403).json({ error: 'Bots are not allowed in tournament leaderboards.' });
       return;
     }
@@ -1198,17 +1486,6 @@ async function startServer() {
         }
         return { ...p, streak: 0, gamesPlayed: p.gamesPlayed + 1 };
       }
-      if (!p.userId) {
-        const botGain = isSwiss
-          ? [0, 0.5, 1][Math.floor(Math.random() * 3)]
-          : [0, 1, 2][Math.floor(Math.random() * 3)];
-        return {
-          ...p,
-          score: p.score + botGain,
-          gamesPlayed: p.gamesPlayed + 1,
-          buchholz: (p.buchholz || 0) + (botGain > 0 ? 1 : 0.5),
-        };
-      }
       return p;
     });
 
@@ -1240,6 +1517,1029 @@ async function startServer() {
     res.json({ ok: true });
   });
 
+  // ==================== GLOBAL TOURNAMENT CHAT (REST + WEBSOCKET) ====================
+  const wssTournamentChat = new WebSocketServer({ noServer: true });
+
+  function broadcastTournamentChat(payload: unknown): void {
+    const serialized = JSON.stringify(payload);
+    for (const client of wssTournamentChat.clients) {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(serialized);
+      }
+    }
+  }
+
+  function appendGlobalTournamentChatMessage(params: {
+    clientMsgId?: unknown;
+    text: unknown;
+    tournamentTag?: unknown;
+    user: StoredUser | null;
+  }):
+    | { ok: true; message: StoredGlobalTournamentChatMessage; duplicate: boolean }
+    | { ok: false; error: string } {
+    const rawText = typeof params.text === 'string' ? params.text.trim() : '';
+    if (rawText.length < 1 || rawText.length > 300) {
+      return { ok: false, error: 'Message must be between 1 and 300 characters.' };
+    }
+    const rawId = typeof params.clientMsgId === 'string' ? params.clientMsgId.trim() : '';
+    const validId = /^[a-zA-Z0-9_-]{6,64}$/.test(rawId)
+      ? rawId
+      : `tgc-${crypto.randomUUID().slice(0, 16)}`;
+
+    const existing = store.tournamentGlobalChat.find((m) => m.id === validId);
+    if (existing) {
+      return { ok: true, message: existing, duplicate: true };
+    }
+
+    const rawTag =
+      typeof params.tournamentTag === 'string' ? params.tournamentTag.trim().slice(0, 80) : '';
+    const message: StoredGlobalTournamentChatMessage = {
+      id: validId,
+      author: params.user ? params.user.username : 'Anonymous',
+      isGuest: !params.user,
+      tournamentTag: rawTag || undefined,
+      text: rawText,
+      createdAt: new Date().toISOString(),
+    };
+
+    store.tournamentGlobalChat.push(message);
+    if (store.tournamentGlobalChat.length > 250) {
+      store.tournamentGlobalChat = store.tournamentGlobalChat.slice(-250);
+    }
+    saveStore(store);
+    return { ok: true, message, duplicate: false };
+  }
+
+  app.get('/api/tournaments/chat', (_req: Request, res: Response) => {
+    res.json({
+      messages: store.tournamentGlobalChat,
+      onlineCount: wssTournamentChat.clients.size,
+    });
+  });
+
+  app.post('/api/tournaments/chat', (req: Request, res: Response) => {
+    const auth = resolveOptionalAuth(req, res);
+    if (!auth.ok) return;
+
+    const result = appendGlobalTournamentChatMessage({
+      clientMsgId: req.body?.id,
+      text: req.body?.text,
+      tournamentTag: req.body?.tournamentTag,
+      user: auth.user,
+    });
+    if (!result.ok) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    if (!result.duplicate) {
+      broadcastTournamentChat({ type: 'chat:message', message: result.message });
+    }
+    res.status(result.duplicate ? 200 : 201).json({ message: result.message });
+  });
+
+  wssTournamentChat.on('connection', (ws) => {
+    ws.send(
+      JSON.stringify({
+        type: 'chat:init',
+        messages: store.tournamentGlobalChat,
+        onlineCount: wssTournamentChat.clients.size,
+      })
+    );
+    broadcastTournamentChat({
+      type: 'chat:presence',
+      onlineCount: wssTournamentChat.clients.size,
+    });
+
+    ws.on('message', (raw) => {
+      try {
+        const parsed = JSON.parse(raw.toString()) as {
+          type?: string;
+          clientMsgId?: string;
+          token?: string | null;
+          text?: string;
+          tournamentTag?: string;
+        };
+        if (parsed?.type !== 'chat:send') return;
+
+        const tokenStr = typeof parsed.token === 'string' ? parsed.token.trim() : '';
+        const verified = tokenStr ? verifyToken(tokenStr) : null;
+        const result = appendGlobalTournamentChatMessage({
+          clientMsgId: parsed.clientMsgId,
+          text: parsed.text,
+          tournamentTag: parsed.tournamentTag,
+          user: verified ? verified.user : null,
+        });
+        if (!result.ok) {
+          ws.send(JSON.stringify({ type: 'chat:error', error: result.error }));
+          return;
+        }
+        if (!result.duplicate) {
+          broadcastTournamentChat({ type: 'chat:message', message: result.message });
+        }
+      } catch {
+        // Ignore malformed payloads
+      }
+    });
+
+    ws.on('close', () => {
+      broadcastTournamentChat({
+        type: 'chat:presence',
+        onlineCount: wssTournamentChat.clients.size,
+      });
+    });
+  });
+
+  // ==================== CUSTOM PUZZLES, CLUBS & HALL OF FAME APIS ====================
+  app.get('/api/puzzles/custom', (_req: Request, res: Response) => {
+    res.json({ puzzles: store.customPuzzles });
+  });
+
+  app.post('/api/puzzles/custom', (req: Request, res: Response) => {
+    const auth = resolveOptionalAuth(req, res);
+    if (!auth.ok) return;
+
+    const title = typeof req.body?.title === 'string' ? req.body.title.trim().slice(0, 80) : '';
+    const fen = typeof req.body?.fen === 'string' ? req.body.fen.trim() : '';
+    const rawSolution = Array.isArray(req.body?.solutionUci) ? req.body.solutionUci : [];
+    const themes = Array.isArray(req.body?.themes)
+      ? req.body.themes.filter((t: unknown): t is string => typeof t === 'string').slice(0, 6)
+      : ['Custom'];
+    const rating = clampLeaderboardRating(req.body?.rating, 1500);
+
+    if (title.length < 3) {
+      res.status(400).json({ error: 'Puzzle title must be at least 3 characters.' });
+      return;
+    }
+    if (!fen || rawSolution.length < 1 || rawSolution.length > 10) {
+      res.status(400).json({ error: 'Provide a valid FEN and 1–10 solution moves.' });
+      return;
+    }
+
+    let state: BoardState;
+    try {
+      state = parseFen(fen, 'standard');
+    } catch {
+      res.status(400).json({ error: 'Invalid FEN position.' });
+      return;
+    }
+    const playerColor = state.turn;
+    const verifiedUci: string[] = [];
+    let simState = state;
+    for (const rawMove of rawSolution) {
+      if (typeof rawMove !== 'string') {
+        res.status(400).json({ error: 'Invalid move format in solution.' });
+        return;
+      }
+      const mv = uciToMove(simState, rawMove.trim());
+      if (!mv) {
+        res.status(400).json({ error: `Illegal move "${rawMove}" in solution sequence.` });
+        return;
+      }
+      const applied = makeMove(simState, mv);
+      verifiedUci.push(applied.uci);
+      simState = applied.next;
+    }
+
+    const created: StoredCustomPuzzle = {
+      id: `cp-${crypto.randomUUID().slice(0, 10)}`,
+      title,
+      rating,
+      themes: themes.length > 0 ? themes : ['Custom'],
+      fen: toFen(state),
+      solutionUci: verifiedUci,
+      playerColor,
+      author: auth.user ? auth.user.username : 'Anonymous',
+      createdAt: new Date().toISOString(),
+    };
+    store.customPuzzles.unshift(created);
+    if (store.customPuzzles.length > 200) {
+      store.customPuzzles = store.customPuzzles.slice(0, 200);
+    }
+    saveStore(store);
+    res.status(201).json({ puzzle: created });
+  });
+
+  app.get('/api/clubs', (_req: Request, res: Response) => {
+    const clubs = [...store.clubs]
+      .sort((a, b) => b.totalScore - a.totalScore)
+      .map((c) => ({
+        id: c.id,
+        name: c.name,
+        description: c.description,
+        createdBy: c.createdBy,
+        memberCount: c.members.length,
+        members: c.members,
+        totalScore: c.totalScore,
+      }));
+    res.json({ clubs });
+  });
+
+  app.post('/api/clubs', (req: Request, res: Response) => {
+    const auth = resolveOptionalAuth(req, res);
+    if (!auth.ok) return;
+
+    const name = typeof req.body?.name === 'string' ? req.body.name.trim().slice(0, 48) : '';
+    const description =
+      typeof req.body?.description === 'string'
+        ? req.body.description.trim().slice(0, 160)
+        : 'Friendly chess club & team war squad.';
+    if (name.length < 3) {
+      res.status(400).json({ error: 'Club name must be at least 3 characters.' });
+      return;
+    }
+    if (store.clubs.some((c) => c.name.toLowerCase() === name.toLowerCase())) {
+      res.status(409).json({ error: 'A club with that name already exists.' });
+      return;
+    }
+    const creator = auth.user ? auth.user.username : 'Anonymous';
+    const club: StoredClub = {
+      id: `club-${crypto.randomUUID().slice(0, 8)}`,
+      name,
+      description: description || 'Friendly chess club & team war squad.',
+      createdBy: creator,
+      members: [creator],
+      totalScore: 50,
+    };
+    store.clubs.unshift(club);
+    saveStore(store);
+    res.status(201).json({
+      club: {
+        ...club,
+        memberCount: club.members.length,
+      },
+    });
+  });
+
+  app.post('/api/clubs/:id/join', (req: Request, res: Response) => {
+    const auth = resolveOptionalAuth(req, res);
+    if (!auth.ok) return;
+    const club = store.clubs.find((c) => c.id === req.params.id);
+    if (!club) {
+      res.status(404).json({ error: 'Club not found.' });
+      return;
+    }
+    const memberName = auth.user
+      ? auth.user.username
+      : typeof req.body?.visitorId === 'string' && req.body.visitorId.trim()
+      ? `Guest-${req.body.visitorId.trim().slice(-4)}`
+      : 'Anonymous';
+    const rawDelta = Number(req.body?.scoreDelta);
+    if (Number.isFinite(rawDelta) && rawDelta > 0) {
+      club.totalScore += Math.min(20, Math.round(rawDelta));
+    } else if (club.members.includes(memberName)) {
+      if (club.members.length > 1) {
+        club.members = club.members.filter((m) => m !== memberName);
+      }
+    } else {
+      club.members.push(memberName);
+      club.totalScore += 15;
+    }
+    saveStore(store);
+    res.json({
+      club: {
+        ...club,
+        memberCount: club.members.length,
+      },
+    });
+  });
+
+  app.get('/api/tournaments/hall-of-fame', (_req: Request, res: Response) => {
+    res.json({ entries: store.hallOfFame });
+  });
+
+  app.post('/api/tournaments/hall-of-fame', (req: Request, res: Response) => {
+    const tournamentId =
+      typeof req.body?.tournamentId === 'string' ? req.body.tournamentId.trim().slice(0, 64) : '';
+    const tournamentName =
+      typeof req.body?.tournamentName === 'string'
+        ? req.body.tournamentName.trim().slice(0, 80)
+        : '';
+    const format =
+      req.body?.format === 'swiss' || req.body?.format === 'knockout' ? req.body.format : 'arena';
+    const rawPodium = Array.isArray(req.body?.podium) ? req.body.podium.slice(0, 3) : [];
+    if (!tournamentId || !tournamentName || rawPodium.length === 0) {
+      res.status(400).json({ error: 'Tournament podium payload is incomplete.' });
+      return;
+    }
+    const existing = store.hallOfFame.find((e) => e.tournamentId === tournamentId);
+    if (existing) {
+      res.json({ entry: existing });
+      return;
+    }
+    const entry: StoredHallOfFameEntry = {
+      id: `hof-${crypto.randomUUID().slice(0, 8)}`,
+      tournamentId,
+      tournamentName,
+      format,
+      completedAt: new Date().toISOString(),
+      podium: rawPodium.map(
+        (p: { name?: unknown; isGuest?: unknown; score?: unknown }, idx: number) => ({
+          rank: (idx + 1) as 1 | 2 | 3,
+          name: typeof p?.name === 'string' ? p.name.slice(0, 48) : 'Player',
+          isGuest: Boolean(p?.isGuest),
+          score: Number(p?.score) || 0,
+        })
+      ),
+    };
+    store.hallOfFame.unshift(entry);
+    if (store.hallOfFame.length > 50) {
+      store.hallOfFame = store.hallOfFame.slice(0, 50);
+    }
+    saveStore(store);
+    res.status(201).json({ entry });
+  });
+
+  // ==================== REAL-TIME 1v1 MULTIPLAYER ARENA & SPECTATOR TV (/ws/arena) ====================
+  interface ArenaRoomChat {
+    id: string;
+    author: string;
+    isGuest: boolean;
+    text: string;
+    createdAt: string;
+  }
+
+  interface ArenaRoom {
+    id: string;
+    variant: ChessVariant;
+    timeControl: string;
+    baseMs: number;
+    incMs: number;
+    state: BoardState;
+    initialFen: string;
+    historyStates: BoardState[];
+    moves: Move[];
+    fens: string[];
+    whiteWs: WebSocket | null;
+    blackWs: WebSocket | null;
+    whiteName: string;
+    blackName: string;
+    whiteIsGuest: boolean;
+    blackIsGuest: boolean;
+    whiteMs: number;
+    blackMs: number;
+    lastTickAt: number;
+    status: 'waiting' | 'active' | 'finished';
+    resultReason: string | null;
+    winner: PieceColor | 'draw' | null;
+    drawOfferBy: PieceColor | null;
+    takebackOfferBy: PieceColor | null;
+    rematchVotes: { w: boolean; b: boolean };
+    series: { w: number; b: number; draws: number; round: number };
+    spectators: Set<WebSocket>;
+    chat: ArenaRoomChat[];
+  }
+
+  interface ArenaQueueEntry {
+    ws: WebSocket;
+    variant: ChessVariant;
+    timeControl: string;
+    name: string;
+    isGuest: boolean;
+  }
+
+  const arenaRooms = new Map<string, ArenaRoom>();
+  let arenaQueue: ArenaQueueEntry[] = [];
+  const wssArena = new WebSocketServer({ noServer: true });
+
+  function parseTimeControlMs(tc: string): { baseMs: number; incMs: number } {
+    const parts = tc.split('+').map((n) => parseInt(n, 10));
+    const min = Number.isFinite(parts[0]) && parts[0] > 0 ? Math.min(60, parts[0]) : 5;
+    const inc = Number.isFinite(parts[1]) && parts[1] >= 0 ? Math.min(30, parts[1]) : 0;
+    return { baseMs: min * 60_000, incMs: inc * 1000 };
+  }
+
+  function resolveSocketIdentity(token?: unknown): { name: string; isGuest: boolean } {
+    const tokenStr = typeof token === 'string' ? token.trim() : '';
+    const verified = tokenStr ? verifyToken(tokenStr) : null;
+    if (verified) {
+      return { name: verified.user.username, isGuest: false };
+    }
+    return { name: 'Anonymous', isGuest: true };
+  }
+
+  function tickRoomClock(room: ArenaRoom) {
+    if (room.status !== 'active' || room.moves.length === 0) {
+      room.lastTickAt = Date.now();
+      return;
+    }
+    const now = Date.now();
+    const elapsed = Math.max(0, now - room.lastTickAt);
+    room.lastTickAt = now;
+    if (room.state.turn === 'w') {
+      room.whiteMs = Math.max(0, room.whiteMs - elapsed);
+      if (room.whiteMs === 0) {
+        room.status = 'finished';
+        room.winner = 'b';
+        room.resultReason = 'White flagged on time';
+      }
+    } else {
+      room.blackMs = Math.max(0, room.blackMs - elapsed);
+      if (room.blackMs === 0) {
+        room.status = 'finished';
+        room.winner = 'w';
+        room.resultReason = 'Black flagged on time';
+      }
+    }
+  }
+
+  function serializeRoomState(room: ArenaRoom) {
+    return {
+      type: 'room:state',
+      room: {
+        id: room.id,
+        variant: room.variant,
+        timeControl: room.timeControl,
+        fen: toFen(room.state),
+        turn: room.state.turn,
+        moves: room.moves,
+        fens: room.fens,
+        whiteName: room.whiteName,
+        blackName: room.blackName,
+        whiteIsGuest: room.whiteIsGuest,
+        blackIsGuest: room.blackIsGuest,
+        whiteMs: room.whiteMs,
+        blackMs: room.blackMs,
+        status: room.status,
+        winner: room.winner,
+        resultReason: room.resultReason,
+        drawOfferBy: room.drawOfferBy,
+        takebackOfferBy: room.takebackOfferBy,
+        rematchVotes: room.rematchVotes,
+        series: room.series,
+        spectatorCount: room.spectators.size,
+        chat: room.chat,
+      },
+    };
+  }
+
+  function broadcastArenaRoom(room: ArenaRoom) {
+    const payload = JSON.stringify(serializeRoomState(room));
+    const targets: (WebSocket | null)[] = [room.whiteWs, room.blackWs, ...room.spectators];
+    for (const sock of targets) {
+      if (sock && sock.readyState === WebSocket.OPEN) {
+        sock.send(payload);
+      }
+    }
+  }
+
+  function createArenaRoom(params: {
+    variant: ChessVariant;
+    timeControl: string;
+    whiteWs: WebSocket;
+    whiteName: string;
+    whiteIsGuest: boolean;
+    blackWs?: WebSocket | null;
+    blackName?: string;
+    blackIsGuest?: boolean;
+  }): ArenaRoom {
+    const { baseMs, incMs } = parseTimeControlMs(params.timeControl);
+    const state = createInitialState(params.variant);
+    const initialFen = toFen(state);
+    const room: ArenaRoom = {
+      id: `rm-${crypto.randomUUID().slice(0, 8)}`,
+      variant: params.variant,
+      timeControl: params.timeControl,
+      baseMs,
+      incMs,
+      state,
+      initialFen,
+      historyStates: [state],
+      moves: [],
+      fens: [initialFen],
+      whiteWs: params.whiteWs,
+      blackWs: params.blackWs ?? null,
+      whiteName: params.whiteName,
+      blackName: params.blackName ?? 'Waiting for opponent...',
+      whiteIsGuest: params.whiteIsGuest,
+      blackIsGuest: params.blackIsGuest ?? true,
+      whiteMs: baseMs,
+      blackMs: baseMs,
+      lastTickAt: Date.now(),
+      status: params.blackWs ? 'active' : 'waiting',
+      resultReason: null,
+      winner: null,
+      drawOfferBy: null,
+      takebackOfferBy: null,
+      rematchVotes: { w: false, b: false },
+      series: { w: 0, b: 0, draws: 0, round: 1 },
+      spectators: new Set(),
+      chat: [],
+    };
+    arenaRooms.set(room.id, room);
+    return room;
+  }
+
+  function getSocketRole(room: ArenaRoom, ws: WebSocket): PieceColor | null {
+    if (room.whiteWs === ws) return 'w';
+    if (room.blackWs === ws) return 'b';
+    return null;
+  }
+
+  app.get('/api/live-games', (_req: Request, res: Response) => {
+    const games = Array.from(arenaRooms.values())
+      .filter((r) => r.status === 'active' || r.status === 'waiting')
+      .map((r) => {
+        tickRoomClock(r);
+        return {
+          roomId: r.id,
+          variant: r.variant,
+          timeControl: r.timeControl,
+          whiteName: r.whiteName,
+          whiteIsGuest: r.whiteIsGuest,
+          blackName: r.blackName,
+          blackIsGuest: r.blackIsGuest,
+          fen: toFen(r.state),
+          moveCount: r.moves.length,
+          spectatorCount: r.spectators.size,
+          status: r.status,
+        };
+      })
+      .slice(0, 24);
+    res.json({ games });
+  });
+
+  wssArena.on('connection', (ws) => {
+    let activeRoomId: string | null = null;
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString()) as {
+          type?: string;
+          variant?: ChessVariant;
+          timeControl?: string;
+          token?: string | null;
+          roomId?: string;
+          uci?: string;
+          text?: string;
+        };
+        const ident = resolveSocketIdentity(msg.token);
+
+        if (msg.type === 'queue:join') {
+          const variant: ChessVariant =
+            msg.variant && VALID_VARIANTS.has(msg.variant) ? msg.variant : 'standard';
+          const tc =
+            typeof msg.timeControl === 'string' && /^\d{1,2}\+\d{1,2}$/.test(msg.timeControl)
+              ? msg.timeControl
+              : '5+0';
+          arenaQueue = arenaQueue.filter((q) => q.ws !== ws && q.ws.readyState === WebSocket.OPEN);
+
+          const matchIdx = arenaQueue.findIndex(
+            (q) => q.variant === variant && q.timeControl === tc
+          );
+          if (matchIdx >= 0) {
+            const opponent = arenaQueue.splice(matchIdx, 1)[0];
+            const swap = Math.random() < 0.5;
+            const room = createArenaRoom({
+              variant,
+              timeControl: tc,
+              whiteWs: swap ? ws : opponent.ws,
+              whiteName: swap ? ident.name : opponent.name,
+              whiteIsGuest: swap ? ident.isGuest : opponent.isGuest,
+              blackWs: swap ? opponent.ws : ws,
+              blackName: swap ? opponent.name : ident.name,
+              blackIsGuest: swap ? opponent.isGuest : ident.isGuest,
+            });
+            activeRoomId = room.id;
+            room.whiteWs?.send(
+              JSON.stringify({ type: 'room:assigned', roomId: room.id, myColor: 'w' })
+            );
+            room.blackWs?.send(
+              JSON.stringify({ type: 'room:assigned', roomId: room.id, myColor: 'b' })
+            );
+            broadcastArenaRoom(room);
+          } else {
+            arenaQueue.push({
+              ws,
+              variant,
+              timeControl: tc,
+              name: ident.name,
+              isGuest: ident.isGuest,
+            });
+            ws.send(JSON.stringify({ type: 'queue:waiting', variant, timeControl: tc }));
+          }
+          return;
+        }
+
+        if (msg.type === 'queue:leave') {
+          arenaQueue = arenaQueue.filter((q) => q.ws !== ws);
+          return;
+        }
+
+        if (msg.type === 'room:create') {
+          const variant: ChessVariant =
+            msg.variant && VALID_VARIANTS.has(msg.variant) ? msg.variant : 'standard';
+          const tc =
+            typeof msg.timeControl === 'string' && /^\d{1,2}\+\d{1,2}$/.test(msg.timeControl)
+              ? msg.timeControl
+              : '5+0';
+          const room = createArenaRoom({
+            variant,
+            timeControl: tc,
+            whiteWs: ws,
+            whiteName: ident.name,
+            whiteIsGuest: ident.isGuest,
+          });
+          activeRoomId = room.id;
+          ws.send(JSON.stringify({ type: 'room:assigned', roomId: room.id, myColor: 'w' }));
+          broadcastArenaRoom(room);
+          return;
+        }
+
+        if (msg.type === 'room:join' && typeof msg.roomId === 'string') {
+          const room = arenaRooms.get(msg.roomId.trim());
+          if (!room) {
+            ws.send(JSON.stringify({ type: 'arena:error', error: 'Challenge room not found.' }));
+            return;
+          }
+          activeRoomId = room.id;
+          if (room.whiteWs === ws) {
+            ws.send(JSON.stringify({ type: 'room:assigned', roomId: room.id, myColor: 'w' }));
+          } else if (!room.blackWs || room.blackWs.readyState !== WebSocket.OPEN) {
+            room.blackWs = ws;
+            room.blackName = ident.name;
+            room.blackIsGuest = ident.isGuest;
+            room.status = 'active';
+            room.lastTickAt = Date.now();
+            ws.send(JSON.stringify({ type: 'room:assigned', roomId: room.id, myColor: 'b' }));
+          } else {
+            room.spectators.add(ws);
+            ws.send(
+              JSON.stringify({ type: 'room:assigned', roomId: room.id, myColor: 'spectator' })
+            );
+          }
+          broadcastArenaRoom(room);
+          return;
+        }
+
+        if (msg.type === 'room:spectate' && typeof msg.roomId === 'string') {
+          const room = arenaRooms.get(msg.roomId.trim());
+          if (!room) {
+            ws.send(JSON.stringify({ type: 'arena:error', error: 'Live game not found.' }));
+            return;
+          }
+          activeRoomId = room.id;
+          room.spectators.add(ws);
+          ws.send(
+            JSON.stringify({ type: 'room:assigned', roomId: room.id, myColor: 'spectator' })
+          );
+          broadcastArenaRoom(room);
+          return;
+        }
+
+        const roomId = typeof msg.roomId === 'string' ? msg.roomId : activeRoomId;
+        if (!roomId) return;
+        const room = arenaRooms.get(roomId);
+        if (!room) return;
+        const role = getSocketRole(room, ws);
+
+        if (msg.type === 'room:move' && role && room.status === 'active') {
+          tickRoomClock(room);
+          if (room.status !== 'active') {
+            broadcastArenaRoom(room);
+            return;
+          }
+          if (room.state.turn !== role || typeof msg.uci !== 'string') return;
+          const mv = uciToMove(room.state, msg.uci.trim());
+          if (!mv) return;
+          const applied = makeMove(room.state, mv);
+          if (role === 'w') {
+            room.whiteMs += room.incMs;
+          } else {
+            room.blackMs += room.incMs;
+          }
+          room.state = applied.next;
+          room.historyStates.push(applied.next);
+          room.moves.push({ ...mv, san: applied.san, uci: applied.uci });
+          room.fens.push(toFen(applied.next));
+          room.drawOfferBy = null;
+          room.takebackOfferBy = null;
+
+          const res = evaluateGameResult(room.state);
+          if (res) {
+            room.status = 'finished';
+            room.winner = res.winner;
+            room.resultReason = res.reason;
+            if (res.winner === 'w') room.series.w += 1;
+            else if (res.winner === 'b') room.series.b += 1;
+            else room.series.draws += 1;
+          }
+          broadcastArenaRoom(room);
+          return;
+        }
+
+        if (msg.type === 'room:resign' && role && room.status === 'active') {
+          room.status = 'finished';
+          room.winner = role === 'w' ? 'b' : 'w';
+          room.resultReason = `${role === 'w' ? 'White' : 'Black'} resigned`;
+          if (room.winner === 'w') room.series.w += 1;
+          else room.series.b += 1;
+          broadcastArenaRoom(room);
+          return;
+        }
+
+        if (msg.type === 'room:draw_offer' && role && room.status === 'active') {
+          room.drawOfferBy = role;
+          broadcastArenaRoom(room);
+          return;
+        }
+
+        if (
+          msg.type === 'room:draw_accept' &&
+          role &&
+          room.status === 'active' &&
+          room.drawOfferBy &&
+          room.drawOfferBy !== role
+        ) {
+          room.status = 'finished';
+          room.winner = 'draw';
+          room.resultReason = 'Draw by mutual agreement';
+          room.series.draws += 1;
+          room.drawOfferBy = null;
+          broadcastArenaRoom(room);
+          return;
+        }
+
+        if (
+          msg.type === 'room:takeback_request' &&
+          role &&
+          room.status === 'active' &&
+          room.moves.length > 0
+        ) {
+          room.takebackOfferBy = role;
+          broadcastArenaRoom(room);
+          return;
+        }
+
+        if (
+          msg.type === 'room:takeback_accept' &&
+          role &&
+          room.status === 'active' &&
+          room.takebackOfferBy &&
+          room.takebackOfferBy !== role &&
+          room.historyStates.length > 1
+        ) {
+          room.historyStates.pop();
+          room.moves.pop();
+          room.fens.pop();
+          room.state = room.historyStates[room.historyStates.length - 1];
+          room.takebackOfferBy = null;
+          broadcastArenaRoom(room);
+          return;
+        }
+
+        if (msg.type === 'room:rematch' && role && room.status === 'finished') {
+          room.rematchVotes[role] = true;
+          if (room.rematchVotes.w && room.rematchVotes.b) {
+            // Swap colors for fair Best-of-3 series
+            const prevWhiteWs = room.whiteWs;
+            const prevWhiteName = room.whiteName;
+            const prevWhiteGuest = room.whiteIsGuest;
+            room.whiteWs = room.blackWs;
+            room.whiteName = room.blackName;
+            room.whiteIsGuest = room.blackIsGuest;
+            room.blackWs = prevWhiteWs;
+            room.blackName = prevWhiteName;
+            room.blackIsGuest = prevWhiteGuest;
+
+            const prevSeriesW = room.series.w;
+            room.series = {
+              w: room.series.b,
+              b: prevSeriesW,
+              draws: room.series.draws,
+              round: room.series.round + 1,
+            };
+
+            const nextState = createInitialState(room.variant);
+            room.state = nextState;
+            room.initialFen = toFen(nextState);
+            room.historyStates = [nextState];
+            room.moves = [];
+            room.fens = [room.initialFen];
+            room.whiteMs = room.baseMs;
+            room.blackMs = room.baseMs;
+            room.lastTickAt = Date.now();
+            room.status = 'active';
+            room.winner = null;
+            room.resultReason = null;
+            room.drawOfferBy = null;
+            room.takebackOfferBy = null;
+            room.rematchVotes = { w: false, b: false };
+            room.whiteWs?.send(
+              JSON.stringify({ type: 'room:assigned', roomId: room.id, myColor: 'w' })
+            );
+            room.blackWs?.send(
+              JSON.stringify({ type: 'room:assigned', roomId: room.id, myColor: 'b' })
+            );
+          }
+          broadcastArenaRoom(room);
+          return;
+        }
+
+        if (msg.type === 'room:chat' && typeof msg.text === 'string') {
+          const cleanText = msg.text.trim().slice(0, 240);
+          if (!cleanText) return;
+          room.chat.push({
+            id: `rc-${crypto.randomUUID().slice(0, 8)}`,
+            author: ident.name,
+            isGuest: ident.isGuest,
+            text: cleanText,
+            createdAt: new Date().toISOString(),
+          });
+          if (room.chat.length > 80) {
+            room.chat = room.chat.slice(-80);
+          }
+          broadcastArenaRoom(room);
+        }
+      } catch {
+        // Ignore malformed payloads
+      }
+    });
+
+    ws.on('close', () => {
+      arenaQueue = arenaQueue.filter((q) => q.ws !== ws);
+      if (activeRoomId) {
+        const room = arenaRooms.get(activeRoomId);
+        if (room) {
+          room.spectators.delete(ws);
+          const role = getSocketRole(room, ws);
+          if (role && room.status === 'active') {
+            room.status = 'finished';
+            room.winner = role === 'w' ? 'b' : 'w';
+            room.resultReason = `${role === 'w' ? 'White' : 'Black'} disconnected`;
+          }
+          broadcastArenaRoom(room);
+          if (
+            (!room.whiteWs || room.whiteWs.readyState !== WebSocket.OPEN) &&
+            (!room.blackWs || room.blackWs.readyState !== WebSocket.OPEN) &&
+            room.spectators.size === 0
+          ) {
+            arenaRooms.delete(room.id);
+          }
+        }
+      }
+    });
+  });
+
+  // ==================== REAL-TIME 1v1 PUZZLE DUEL (/ws/puzzle-duel) ====================
+  interface DuelMatch {
+    id: string;
+    p1Ws: WebSocket;
+    p2Ws: WebSocket;
+    p1Name: string;
+    p2Name: string;
+    p1Score: number;
+    p2Score: number;
+    timer: ReturnType<typeof setTimeout>;
+  }
+
+  let duelQueue: { ws: WebSocket; name: string; isGuest: boolean }[] = [];
+  const duelMatches = new Map<string, DuelMatch>();
+  const wssPuzzleDuel = new WebSocketServer({ noServer: true });
+
+  wssPuzzleDuel.on('connection', (ws) => {
+    let activeDuelId: string | null = null;
+
+    ws.on('message', (raw) => {
+      try {
+        const msg = JSON.parse(raw.toString()) as {
+          type?: string;
+          token?: string | null;
+          matchId?: string;
+          score?: number;
+        };
+        const ident = resolveSocketIdentity(msg.token);
+
+        if (msg.type === 'duel:join') {
+          duelQueue = duelQueue.filter((q) => q.ws !== ws && q.ws.readyState === WebSocket.OPEN);
+          if (duelQueue.length > 0) {
+            const opp = duelQueue.shift()!;
+            const matchId = `duel-${crypto.randomUUID().slice(0, 8)}`;
+            const shuffled = [...CURATED_PUZZLES].sort(() => Math.random() - 0.5).slice(0, 12);
+            const timer = setTimeout(() => {
+              const m = duelMatches.get(matchId);
+              if (!m) return;
+              const finishPayload = (
+                myScore: number,
+                oppScore: number,
+                oppName: string
+              ) =>
+                JSON.stringify({
+                  type: 'duel:finish',
+                  matchId,
+                  myScore,
+                  oppScore,
+                  oppName,
+                  outcome:
+                    myScore > oppScore ? 'win' : myScore < oppScore ? 'loss' : 'draw',
+                });
+              if (m.p1Ws.readyState === WebSocket.OPEN) {
+                m.p1Ws.send(finishPayload(m.p1Score, m.p2Score, m.p2Name));
+              }
+              if (m.p2Ws.readyState === WebSocket.OPEN) {
+                m.p2Ws.send(finishPayload(m.p2Score, m.p1Score, m.p1Name));
+              }
+              duelMatches.delete(matchId);
+            }, 90_000);
+
+            const match: DuelMatch = {
+              id: matchId,
+              p1Ws: opp.ws,
+              p2Ws: ws,
+              p1Name: opp.name,
+              p2Name: ident.name,
+              p1Score: 0,
+              p2Score: 0,
+              timer,
+            };
+            duelMatches.set(matchId, match);
+            activeDuelId = matchId;
+
+            if (opp.ws.readyState === WebSocket.OPEN) {
+              opp.ws.send(
+                JSON.stringify({
+                  type: 'duel:start',
+                  matchId,
+                  durationSec: 90,
+                  puzzles: shuffled,
+                  opponentName: ident.name,
+                  opponentIsGuest: ident.isGuest,
+                })
+              );
+            }
+            ws.send(
+              JSON.stringify({
+                type: 'duel:start',
+                matchId,
+                durationSec: 90,
+                puzzles: shuffled,
+                opponentName: opp.name,
+                opponentIsGuest: opp.isGuest,
+              })
+            );
+          } else {
+            duelQueue.push({ ws, name: ident.name, isGuest: ident.isGuest });
+            ws.send(JSON.stringify({ type: 'duel:waiting' }));
+          }
+          return;
+        }
+
+        if (msg.type === 'duel:leave') {
+          duelQueue = duelQueue.filter((q) => q.ws !== ws);
+          return;
+        }
+
+        if (msg.type === 'duel:progress') {
+          const matchId = typeof msg.matchId === 'string' ? msg.matchId : activeDuelId;
+          if (!matchId) return;
+          const m = duelMatches.get(matchId);
+          if (!m) return;
+          const score = Math.max(0, Math.min(50, Math.round(Number(msg.score) || 0)));
+          if (m.p1Ws === ws) {
+            m.p1Score = score;
+            if (m.p2Ws.readyState === WebSocket.OPEN) {
+              m.p2Ws.send(JSON.stringify({ type: 'duel:opponent_progress', score }));
+            }
+          } else if (m.p2Ws === ws) {
+            m.p2Score = score;
+            if (m.p1Ws.readyState === WebSocket.OPEN) {
+              m.p1Ws.send(JSON.stringify({ type: 'duel:opponent_progress', score }));
+            }
+          }
+        }
+      } catch {
+        // Ignore malformed payloads
+      }
+    });
+
+    ws.on('close', () => {
+      duelQueue = duelQueue.filter((q) => q.ws !== ws);
+      if (activeDuelId) {
+        const m = duelMatches.get(activeDuelId);
+        if (m) {
+          clearTimeout(m.timer);
+          const other = m.p1Ws === ws ? m.p2Ws : m.p1Ws;
+          const myScore = m.p1Ws === ws ? m.p2Score : m.p1Score;
+          const oppScore = m.p1Ws === ws ? m.p1Score : m.p2Score;
+          const oppName = m.p1Ws === ws ? m.p1Name : m.p2Name;
+          if (other.readyState === WebSocket.OPEN) {
+            other.send(
+              JSON.stringify({
+                type: 'duel:finish',
+                matchId: m.id,
+                myScore,
+                oppScore,
+                oppName,
+                outcome: 'win',
+                reason: 'Opponent left duel',
+              })
+            );
+          }
+          duelMatches.delete(m.id);
+        }
+      }
+    });
+  });
+
   // ==================== VITE DEV / PROD STATIC ====================
   const isProd = process.env.NODE_ENV === 'production';
   if (!isProd) {
@@ -1261,7 +2561,31 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
+  const httpServer = http.createServer(app);
+  httpServer.on('upgrade', (request, socket, head) => {
+    try {
+      const url = new URL(request.url || '/', `http://${request.headers.host || 'localhost'}`);
+      if (url.pathname === '/ws/tournaments-chat') {
+        wssTournamentChat.handleUpgrade(request, socket, head, (ws) => {
+          wssTournamentChat.emit('connection', ws, request);
+        });
+      } else if (url.pathname === '/ws/arena') {
+        wssArena.handleUpgrade(request, socket, head, (ws) => {
+          wssArena.emit('connection', ws, request);
+        });
+      } else if (url.pathname === '/ws/puzzle-duel') {
+        wssPuzzleDuel.handleUpgrade(request, socket, head, (ws) => {
+          wssPuzzleDuel.emit('connection', ws, request);
+        });
+      } else {
+        socket.destroy();
+      }
+    } catch {
+      socket.destroy();
+    }
+  });
+
+  httpServer.listen(PORT, '0.0.0.0', () => {
     console.log(`Caissa server listening on http://0.0.0.0:${PORT}`);
   });
 }

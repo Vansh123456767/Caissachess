@@ -1,8 +1,9 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AuthUser,
   BoardState,
   ChessVariant,
+  HallOfFameEntry,
   Move,
   PieceColor,
   Tournament,
@@ -20,18 +21,26 @@ import { ChessBoard } from './ChessBoard';
 import { soundFX } from '../utils/sound';
 import { isBotAccount } from '../utils/botFilter';
 import {
+  Award,
+  ChevronDown,
+  ChevronUp,
+  Clock,
   Flame,
+  Globe,
   LogIn,
+  Medal,
   MessageSquare,
   Pause,
   Play,
   Plus,
   Send,
+  Share2,
   Shield,
   Swords,
   Table,
   Trash2,
   Trophy,
+  User,
   X,
   Zap,
 } from 'lucide-react';
@@ -52,7 +61,22 @@ const TEAM_BATTLE_CLUBS = [
   'Chess960 Pioneers',
 ];
 
-function createSeedTournaments(username: string): Tournament[] {
+function createSeedTournaments(username: string, isUserBot = false): Tournament[] {
+  const swissUser = !isUserBot
+    ? [
+        {
+          id: 'user',
+          name: username,
+          rating: 1620,
+          score: 0,
+          streak: 0,
+          gamesPlayed: 0,
+          buchholz: 0,
+          isUser: true,
+        },
+      ]
+    : [];
+
   return [
     {
       id: 'arena-blitz',
@@ -65,13 +89,7 @@ function createSeedTournaments(username: string): Tournament[] {
       status: 'active',
       joined: false,
       createdBy: 'Caissa Club',
-      players: [
-        { id: 'p1', name: 'GM_Aurelia', rating: 2480, score: 14, streak: 3, gamesPlayed: 5 },
-        { id: 'p2', name: 'Marcus_960', rating: 1945, score: 10, streak: 2, gamesPlayed: 5 },
-        { id: 'p3', name: 'Elena_Tactics', rating: 1780, score: 8, streak: 0, gamesPlayed: 4 },
-        { id: 'p4', name: 'Viktor_Rapid', rating: 1620, score: 5, streak: 1, gamesPlayed: 4 },
-        { id: 'p5', name: 'Aria_Club', rating: 1440, score: 3, streak: 0, gamesPlayed: 4 },
-      ],
+      players: [],
     },
     {
       id: 'arena-crazyhouse',
@@ -83,12 +101,8 @@ function createSeedTournaments(username: string): Tournament[] {
       currentRound: 1,
       status: 'active',
       joined: false,
-      createdBy: 'EightVariants',
-      players: [
-        { id: 'c1', name: 'DropMaster', rating: 2110, score: 12, streak: 2, gamesPlayed: 4 },
-        { id: 'c2', name: 'EightVariants', rating: 1890, score: 9, streak: 1, gamesPlayed: 4 },
-        { id: 'c3', name: 'PocketRook', rating: 1650, score: 4, streak: 0, gamesPlayed: 3 },
-      ],
+      createdBy: 'Caissa Club',
+      players: [],
     },
     {
       id: 'swiss-open',
@@ -99,16 +113,9 @@ function createSeedTournaments(username: string): Tournament[] {
       totalRounds: 5,
       currentRound: 1,
       status: 'active',
-      joined: true,
+      joined: !isUserBot,
       createdBy: 'Caissa Club',
-      players: [
-        { id: 'user', name: username, rating: 1620, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0, isUser: true },
-        { id: 's1', name: 'IM_Soren', rating: 2350, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: 's2', name: 'Nadia_K', rating: 1740, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: 's3', name: 'Theo_Endgame', rating: 1860, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: 's4', name: 'ClaraV', rating: 1580, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-        { id: 's5', name: 'Henrik_FM', rating: 2190, score: 0, streak: 0, gamesPlayed: 0, buchholz: 0 },
-      ],
+      players: swissUser,
     },
     {
       id: 'battle-world-teams',
@@ -122,16 +129,7 @@ function createSeedTournaments(username: string): Tournament[] {
       status: 'active',
       joined: false,
       createdBy: 'Team League',
-      players: [
-        { id: 'tb1', name: 'GM_Aurelia', rating: 2480, score: 16, streak: 3, gamesPlayed: 5, team: 'Caissa Vanguard' },
-        { id: 'tb2', name: 'Elena_Tactics', rating: 1780, score: 11, streak: 2, gamesPlayed: 5, team: 'Tactical Union' },
-        { id: 'tb3', name: 'IM_Soren', rating: 2350, score: 14, streak: 2, gamesPlayed: 5, team: 'Endgame Guild' },
-        { id: 'tb4', name: 'Marcus_960', rating: 1945, score: 12, streak: 1, gamesPlayed: 5, team: 'Chess960 Pioneers' },
-        { id: 'tb5', name: 'Viktor_Rapid', rating: 1620, score: 8, streak: 1, gamesPlayed: 4, team: 'Caissa Vanguard' },
-        { id: 'tb6', name: 'Nadia_K', rating: 1740, score: 9, streak: 0, gamesPlayed: 5, team: 'Tactical Union' },
-        { id: 'tb7', name: 'Theo_Endgame', rating: 1860, score: 7, streak: 0, gamesPlayed: 4, team: 'Endgame Guild' },
-        { id: 'tb8', name: 'Henrik_FM', rating: 2190, score: 10, streak: 1, gamesPlayed: 4, team: 'Chess960 Pioneers' },
-      ],
+      players: [],
     },
     {
       id: 'battle-variants-clash',
@@ -145,12 +143,7 @@ function createSeedTournaments(username: string): Tournament[] {
       status: 'active',
       joined: false,
       createdBy: 'Chess960 Pioneers',
-      players: [
-        { id: 'vc1', name: 'Marcus_960', rating: 1945, score: 14, streak: 3, gamesPlayed: 4, team: 'Chess960 Pioneers' },
-        { id: 'vc2', name: 'DropMaster', rating: 2110, score: 12, streak: 2, gamesPlayed: 4, team: 'Tactical Union' },
-        { id: 'vc3', name: 'EightVariants', rating: 1890, score: 8, streak: 0, gamesPlayed: 4, team: 'Caissa Vanguard' },
-        { id: 'vc4', name: 'ClaraV', rating: 1580, score: 6, streak: 1, gamesPlayed: 4, team: 'Endgame Guild' },
-      ],
+      players: [],
     },
   ];
 }
@@ -162,24 +155,88 @@ interface LobbyChatMsg {
   time: string;
 }
 
+interface GlobalTournamentChatMsg {
+  id: string;
+  author: string;
+  isGuest: boolean;
+  tournamentTag?: string;
+  text: string;
+  createdAt: string;
+}
+
+interface KnockoutMatchNode {
+  id: string;
+  round: 1 | 2 | 3; // 1: QF, 2: SF, 3: Final
+  p1: { name: string; rating: number; isUser?: boolean } | null;
+  p2: { name: string; rating: number; isUser?: boolean } | null;
+  winner: { name: string; rating: number; isUser?: boolean } | null;
+}
+
+function createInitialKnockoutBracket(username: string, rating: number): KnockoutMatchNode[] {
+  const seeds = [
+    { name: username, rating, isUser: true },
+    { name: 'Elena_Tactics', rating: 1740 },
+    { name: 'Marcus_960', rating: 1680 },
+    { name: 'Sora_Endgame', rating: 1810 },
+    { name: 'Nadia_Knight', rating: 1640 },
+    { name: 'Liam_Gambit', rating: 1715 },
+    { name: 'Aria_Check', rating: 1790 },
+    { name: 'Kenji_Fork', rating: 1625 },
+  ];
+  return [
+    { id: 'qf-1', round: 1, p1: seeds[0], p2: seeds[7], winner: null },
+    { id: 'qf-2', round: 1, p1: seeds[3], p2: seeds[4], winner: null },
+    { id: 'qf-3', round: 1, p1: seeds[1], p2: seeds[6], winner: null },
+    { id: 'qf-4', round: 1, p1: seeds[2], p2: seeds[5], winner: null },
+    { id: 'sf-1', round: 2, p1: null, p2: null, winner: null },
+    { id: 'sf-2', round: 2, p1: null, p2: null, winner: null },
+    { id: 'fin-1', round: 3, p1: null, p2: null, winner: null },
+  ];
+}
+
 export const TournamentsView: React.FC<TournamentsViewProps> = ({
   prefs,
   authUser,
   authToken,
   onOpenAuth,
 }) => {
-  const [formatFilter, setFormatFilter] = useState<'arena' | 'swiss' | 'team_battle'>('arena');
+  const [formatFilter, setFormatFilter] = useState<'arena' | 'swiss' | 'team_battle' | 'knockout'>('arena');
   const [lobbyTab, setLobbyTab] = useState<'standings' | 'pairings' | 'crosstable' | 'chat'>('standings');
   const [selectedTeam, setSelectedTeam] = useState<string>(TEAM_BATTLE_CLUBS[0]);
   const [pausedMap, setPausedMap] = useState<Record<string, boolean>>({});
   const [chatByTournament, setChatByTournament] = useState<Record<string, LobbyChatMsg[]>>({});
   const [chatInput, setChatInput] = useState('');
+  const [globalChatMessages, setGlobalChatMessages] = useState<GlobalTournamentChatMsg[]>([]);
+  const [globalChatInput, setGlobalChatInput] = useState('');
+  const [globalChatOpen, setGlobalChatOpen] = useState<boolean>(true);
+  const [tagCurrentTournament, setTagCurrentTournament] = useState<boolean>(true);
+  const [globalChatError, setGlobalChatError] = useState<string | null>(null);
+  const globalChatWsRef = useRef<WebSocket | null>(null);
+  const globalChatScrollRef = useRef<HTMLDivElement | null>(null);
   const [roundResults, setRoundResults] = useState<Record<string, Record<string, (string | null)[]>>>({});
+  const effectiveUsername = authUser ? authUser.username : 'Anonymous';
+  const isUserBot = isBotAccount({
+    name: authUser ? authUser.username : '',
+    isBot: Boolean(prefs.isBot || authUser?.isBot),
+  });
+
   const [tournaments, setTournaments] = useState<Tournament[]>(() =>
-    createSeedTournaments(prefs.username)
+    createSeedTournaments(effectiveUsername, isUserBot)
   );
   const [activeId, setActiveId] = useState<string>('arena-blitz');
   const [createOpen, setCreateOpen] = useState<boolean>(false);
+
+  // Hourly Arena Countdown & Hall of Fame
+  const [hourlyCountdownSec, setHourlyCountdownSec] = useState<number>(() => {
+    const now = new Date();
+    return 3600 - (now.getMinutes() * 60 + now.getSeconds());
+  });
+  const [hallOfFame, setHallOfFame] = useState<HallOfFameEntry[]>([]);
+  const [knockoutCupTitle, setKnockoutCupTitle] = useState('Caissa 8-Player Knockout Cup');
+  const [knockoutNodes, setKnockoutNodes] = useState<KnockoutMatchNode[]>(() =>
+    createInitialKnockoutBracket(effectiveUsername, authUser?.rating || 1620)
+  );
+  const [activeKnockoutMatchId, setActiveKnockoutMatchId] = useState<string | null>(null);
 
   // Create Tournament form state
   const [newName, setNewName] = useState('');
@@ -194,6 +251,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
   // Active Tournament Game
   const [playingMatch, setPlayingMatch] = useState<{
     tournamentId: string;
+    knockoutNodeId?: string;
     opponent: TournamentPlayer;
     userColor: PieceColor;
     berserk: boolean;
@@ -214,7 +272,9 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
         if (!resp.ok) return;
         const data = await resp.json();
         if (!cancelled && Array.isArray(data?.tournaments) && data.tournaments.length > 0) {
-          const seedBattles = createSeedTournaments(prefs.username).filter((t) => t.isTeamBattle);
+          const seedBattles = createSeedTournaments(effectiveUsername, isUserBot).filter(
+            (t) => t.isTeamBattle
+          );
           const serverList: Tournament[] = data.tournaments;
           const hasBattles = serverList.some((t) => t.isTeamBattle);
           setTournaments(hasBattles ? serverList : [...serverList, ...seedBattles]);
@@ -227,15 +287,173 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [authToken, prefs.username]);
+  }, [authToken, prefs.username, isUserBot]);
+
+  // Hourly arena countdown + Hall of Fame load
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const now = new Date();
+      setHourlyCountdownSec(3600 - (now.getMinutes() * 60 + now.getSeconds()));
+    }, 1000);
+    fetch('/api/tournaments/hall-of-fame')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (Array.isArray(data?.entries)) {
+          setHallOfFame(data.entries);
+        }
+      })
+      .catch(() => {});
+    return () => window.clearInterval(id);
+  }, []);
+
+  const archiveToHallOfFame = async (
+    tournamentId: string,
+    tournamentName: string,
+    format: 'arena' | 'swiss' | 'knockout',
+    podium: { name: string; isGuest?: boolean; score: number }[]
+  ) => {
+    if (podium.length === 0) return;
+    try {
+      const resp = await fetch('/api/tournaments/hall-of-fame', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          tournamentId,
+          tournamentName,
+          format,
+          podium: podium.slice(0, 3),
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data?.entry) {
+        setHallOfFame((prev) =>
+          prev.some((e) => e.tournamentId === data.entry.tournamentId)
+            ? prev
+            : [data.entry as HallOfFameEntry, ...prev]
+        );
+      }
+    } catch {
+      // ignore offline
+    }
+  };
+
+  // Persistent Global Tournament Chat (WebSocket + HTTP sync + auto-reconnect)
+  useEffect(() => {
+    let disposed = false;
+    let reconnectTimer: number | null = null;
+    let backoffMs = 1000;
+
+    const mergeChatMessages = (incoming: GlobalTournamentChatMsg[]) => {
+      setGlobalChatMessages((prev) => {
+        const seen = new Set<string>();
+        const merged: GlobalTournamentChatMsg[] = [];
+        for (const msg of [...prev, ...incoming]) {
+          if (!msg || typeof msg.id !== 'string' || seen.has(msg.id)) continue;
+          seen.add(msg.id);
+          merged.push(msg);
+        }
+        return merged.slice(-250);
+      });
+    };
+
+    const hydrateFromRest = async () => {
+      try {
+        const resp = await fetch('/api/tournaments/chat');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!disposed && Array.isArray(data?.messages)) {
+          mergeChatMessages(data.messages as GlobalTournamentChatMsg[]);
+        }
+      } catch {
+        // Ignore offline/static errors
+      }
+    };
+
+    const connectWs = () => {
+      if (disposed || typeof WebSocket === 'undefined') return;
+      try {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const ws = new WebSocket(`${proto}//${window.location.host}/ws/tournaments-chat`);
+        globalChatWsRef.current = ws;
+
+        ws.onopen = () => {
+          backoffMs = 1000;
+        };
+
+        ws.onmessage = (event) => {
+          try {
+            const payload = JSON.parse(String(event.data)) as {
+              type?: string;
+              messages?: GlobalTournamentChatMsg[];
+              message?: GlobalTournamentChatMsg;
+              error?: string;
+            };
+            if (payload.type === 'chat:init' && Array.isArray(payload.messages)) {
+              mergeChatMessages(payload.messages);
+            } else if (payload.type === 'chat:message' && payload.message) {
+              mergeChatMessages([payload.message]);
+            } else if (payload.type === 'chat:error' && payload.error) {
+              setGlobalChatError(payload.error);
+            }
+          } catch {
+            // Ignore malformed socket payloads
+          }
+        };
+
+        ws.onclose = () => {
+          if (globalChatWsRef.current === ws) {
+            globalChatWsRef.current = null;
+          }
+          if (!disposed) {
+            reconnectTimer = window.setTimeout(() => {
+              backoffMs = Math.min(8000, backoffMs * 2);
+              connectWs();
+            }, backoffMs);
+          }
+        };
+
+        ws.onerror = () => {
+          ws.close();
+        };
+      } catch {
+        // Fallback already handled via REST
+      }
+    };
+
+    void hydrateFromRest();
+    connectWs();
+
+    return () => {
+      disposed = true;
+      if (reconnectTimer !== null) {
+        window.clearTimeout(reconnectTimer);
+      }
+      if (globalChatWsRef.current) {
+        globalChatWsRef.current.close();
+        globalChatWsRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const el = globalChatScrollRef.current;
+    if (el && globalChatOpen) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [globalChatMessages, globalChatOpen]);
 
   const visibleTournaments = tournaments.filter((t) =>
-    formatFilter === 'team_battle' ? Boolean(t.isTeamBattle) : t.format === formatFilter && !t.isTeamBattle
+    formatFilter === 'team_battle'
+      ? Boolean(t.isTeamBattle)
+      : formatFilter === 'knockout'
+      ? false
+      : t.format === formatFilter && !t.isTeamBattle
   );
   const activeTournament =
     tournaments.find((t) => t.id === activeId) || visibleTournaments[0] || tournaments[0];
 
   useEffect(() => {
+    if (formatFilter === 'knockout') return;
     const matchesCurrentFilter =
       activeTournament &&
       (formatFilter === 'team_battle'
@@ -250,11 +468,6 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       if (firstMatch) setActiveId(firstMatch.id);
     }
   }, [formatFilter, activeTournament, tournaments]);
-
-  const isUserBot = isBotAccount({
-    name: prefs.username,
-    isBot: prefs.isBot || authUser?.isBot,
-  });
 
   const sortedStandings = useMemo(() => {
     if (!activeTournament) return [];
@@ -348,7 +561,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
             ...item.players,
             {
               id: 'user',
-              name: prefs.username,
+              name: effectiveUsername,
               rating: authUser?.rating || 1620,
               score: 0,
               streak: 0,
@@ -420,51 +633,23 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       totalRounds: apiFormat === 'swiss' ? newRounds : undefined,
       currentRound: 1,
       status: 'active',
-      joined: true,
-      createdBy: prefs.username,
-      players: [
-        {
-          id: 'user',
-          name: prefs.username,
-          rating: authUser?.rating || 1620,
-          score: 0,
-          streak: 0,
-          gamesPlayed: 0,
-          buchholz: 0,
-          team: isTeamBattle ? selectedTeam : undefined,
-          isUser: true,
-        },
-        {
-          id: `b1-${Date.now()}`,
-          name: 'Elena_Tactics',
-          rating: 1780,
-          score: 0,
-          streak: 0,
-          gamesPlayed: 0,
-          buchholz: 0,
-          team: isTeamBattle ? TEAM_BATTLE_CLUBS[1] : undefined,
-        },
-        {
-          id: `b2-${Date.now()}`,
-          name: 'Marcus_960',
-          rating: 1945,
-          score: 0,
-          streak: 0,
-          gamesPlayed: 0,
-          buchholz: 0,
-          team: isTeamBattle ? TEAM_BATTLE_CLUBS[2] : undefined,
-        },
-        {
-          id: `b3-${Date.now()}`,
-          name: 'Aria_Club',
-          rating: 1440,
-          score: 0,
-          streak: 0,
-          gamesPlayed: 0,
-          buchholz: 0,
-          team: isTeamBattle ? TEAM_BATTLE_CLUBS[3] : undefined,
-        },
-      ],
+      joined: !isUserBot,
+      createdBy: effectiveUsername,
+      players: isUserBot
+        ? []
+        : [
+            {
+              id: 'user',
+              name: effectiveUsername,
+              rating: authUser?.rating || 1620,
+              score: 0,
+              streak: 0,
+              gamesPlayed: 0,
+              buchholz: 0,
+              team: isTeamBattle ? selectedTeam : undefined,
+              isUser: true,
+            },
+          ],
     };
     setTournaments((prev) => [created, ...prev]);
     setFormatFilter(isTeamBattle ? 'team_battle' : created.format);
@@ -500,13 +685,15 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       setPausedMap((pm) => ({ ...pm, [activeTournament.id]: false }));
     }
     if (!activeTournament.joined) void toggleJoin(activeTournament);
-    const pool = activeTournament.players.filter((p) => !p.isUser && (!activeTournament.isTeamBattle || p.team !== selectedTeam));
-    const fallbackPool = activeTournament.players.filter((p) => !p.isUser);
+    const pool = activeTournament.players.filter(
+      (p) => !p.isUser && !isBotAccount(p) && (!activeTournament.isTeamBattle || p.team !== selectedTeam)
+    );
+    const fallbackPool = activeTournament.players.filter((p) => !p.isUser && !isBotAccount(p));
     const candidates = pool.length > 0 ? pool : fallbackPool;
     const opp = candidates[Math.floor(Math.random() * candidates.length)] || {
-      id: 'opp',
-      name: 'ClubChallenger',
-      rating: 1600,
+      id: 'practice-engine',
+      name: 'Practice Opponent',
+      rating: 1650,
       score: 0,
       streak: 0,
       gamesPlayed: 0,
@@ -525,8 +712,92 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     });
   };
 
+  const startKnockoutMatch = (node: KnockoutMatchNode) => {
+    if (!node.p1 || !node.p2 || node.winner) return;
+    const userSide = node.p1.isUser ? node.p1 : node.p2.isUser ? node.p2 : null;
+    if (!userSide) return;
+    const oppSide = node.p1.isUser ? node.p2 : node.p1;
+    setActiveKnockoutMatchId(node.id);
+    setPlayingMatch({
+      tournamentId: 'knockout-cup',
+      knockoutNodeId: node.id,
+      opponent: {
+        id: `ko-${oppSide.name}`,
+        name: oppSide.name,
+        rating: oppSide.rating,
+        score: 0,
+        streak: 0,
+        gamesPlayed: 0,
+      },
+      userColor: Math.random() < 0.5 ? 'w' : 'b',
+      berserk: false,
+      state: createInitialState('standard'),
+      clockSec: 180,
+      oppClockSec: 180,
+      resultText: null,
+    });
+  };
+
+  const resolveKnockoutBracket = (nodeId: string, userWon: boolean) => {
+    setKnockoutNodes((prev) => {
+      const next = prev.map((n) => ({ ...n }));
+      const target = next.find((n) => n.id === nodeId);
+      if (!target || !target.p1 || !target.p2) return prev;
+      const userEnt = target.p1.isUser ? target.p1 : target.p2;
+      const oppEnt = target.p1.isUser ? target.p2 : target.p1;
+      target.winner = userWon ? userEnt : oppEnt;
+
+      // Also simulate peer matches in the same round so the bracket fills organically
+      for (const peer of next.filter((n) => n.round === target.round && n.id !== nodeId && !n.winner && n.p1 && n.p2)) {
+        const p1Chance = 1 / (1 + Math.pow(10, (peer.p2!.rating - peer.p1!.rating) / 400));
+        peer.winner = Math.random() < p1Chance ? peer.p1 : peer.p2;
+      }
+
+      const qf = next.filter((n) => n.round === 1);
+      const sf1 = next.find((n) => n.id === 'sf-1');
+      const sf2 = next.find((n) => n.id === 'sf-2');
+      if (sf1 && qf[0].winner && qf[1].winner) {
+        sf1.p1 = qf[0].winner;
+        sf1.p2 = qf[1].winner;
+      }
+      if (sf2 && qf[2].winner && qf[3].winner) {
+        sf2.p1 = qf[2].winner;
+        sf2.p2 = qf[3].winner;
+      }
+      const fin = next.find((n) => n.id === 'fin-1');
+      if (fin && sf1?.winner && sf2?.winner) {
+        fin.p1 = sf1.winner;
+        fin.p2 = sf2.winner;
+      }
+
+      if (target.round === 3 && fin?.winner) {
+        const runnerUp = fin.winner.name === fin.p1?.name ? fin.p2 : fin.p1;
+        const semiLosers = [sf1, sf2]
+          .map((sf) => (sf && sf.winner ? (sf.winner.name === sf.p1?.name ? sf.p2 : sf.p1) : null))
+          .filter(Boolean);
+        const podium = [
+          { name: fin.winner.name, isGuest: Boolean(fin.winner.isUser && !authUser), score: 3 },
+          runnerUp
+            ? { name: runnerUp.name, isGuest: Boolean(runnerUp.isUser && !authUser), score: 2 }
+            : null,
+          semiLosers[0]
+            ? { name: semiLosers[0]!.name, isGuest: Boolean(semiLosers[0]!.isUser && !authUser), score: 1 }
+            : null,
+        ].filter(Boolean) as { name: string; isGuest?: boolean; score: number }[];
+        void archiveToHallOfFame(`ko-${Date.now()}`, knockoutCupTitle, 'knockout', podium);
+      }
+      return next;
+    });
+    setActiveKnockoutMatchId(null);
+  };
+
   const recordTournamentOutcome = async (outcome: 'win' | 'draw' | 'loss', reason: string) => {
     if (!playingMatch) return;
+    if (playingMatch.knockoutNodeId) {
+      setPlayingMatch((pm) => (pm ? { ...pm, resultText: reason } : null));
+      resolveKnockoutBracket(playingMatch.knockoutNodeId, outcome === 'win');
+      return;
+    }
     const matchId = playingMatch.tournamentId;
     const wasBerserk = playingMatch.berserk;
     const oppId = playingMatch.opponent.id;
@@ -596,15 +867,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
             }
             return { ...p, streak: 0, gamesPlayed: p.gamesPlayed + 1 };
           }
-          const botGain = isSwiss
-            ? [0, 0.5, 1][Math.floor(Math.random() * 3)]
-            : [0, 1, 2][Math.floor(Math.random() * 3)];
-          return {
-            ...p,
-            score: p.score + botGain,
-            gamesPlayed: p.gamesPlayed + 1,
-            buchholz: (p.buchholz || 0) + (botGain > 0 ? 1 : 0.5),
-          };
+          return p;
         });
         return {
           ...t,
@@ -688,6 +951,61 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     }
   };
 
+  const sendGlobalChat = async (preset?: string) => {
+    const text = (preset ?? globalChatInput).trim();
+    if (!text) return;
+    setGlobalChatError(null);
+    const clientMsgId =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? `tgc-${crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`
+        : `tgc-${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    const tournamentTag =
+      tagCurrentTournament && activeTournament ? activeTournament.name : undefined;
+
+    if (!preset) setGlobalChatInput('');
+
+    const ws = globalChatWsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(
+        JSON.stringify({
+          type: 'chat:send',
+          clientMsgId,
+          token: authToken,
+          text,
+          tournamentTag,
+        })
+      );
+      return;
+    }
+
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) {
+        headers.Authorization = `Bearer ${authToken}`;
+      }
+      const resp = await fetch('/api/tournaments/chat', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          id: clientMsgId,
+          text,
+          tournamentTag,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data?.message) {
+        setGlobalChatMessages((prev) => {
+          if (prev.some((m) => m.id === data.message.id)) return prev;
+          return [...prev, data.message as GlobalTournamentChatMsg].slice(-250);
+        });
+      } else if (!resp.ok) {
+        setGlobalChatError(data?.error || 'Could not send chat message.');
+      }
+    } catch {
+      setGlobalChatError('Unable to reach chat server.');
+    }
+  };
+
   const sendLobbyChat = (preset?: string) => {
     if (!activeTournament) return;
     const text = (preset ?? chatInput).trim();
@@ -695,7 +1013,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
     const tId = activeTournament.id;
     const msg: LobbyChatMsg = {
       id: `tc-${Date.now()}`,
-      author: prefs.username,
+      author: effectiveUsername,
       text,
       time: new Date().toTimeString().slice(0, 5),
     };
@@ -704,31 +1022,6 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       [tId]: [...(prev[tId] || []), msg],
     }));
     if (!preset) setChatInput('');
-
-    const pool = activeTournament.players.filter((p) => !p.isUser);
-    const responder = pool[Math.floor(Math.random() * pool.length)];
-    if (responder) {
-      window.setTimeout(() => {
-        const replies = [
-          'Good luck everyone!',
-          'That last endgame was sharp.',
-          'Going for a berserk streak this round!',
-          'Watch out for the leader board surge.',
-        ];
-        setChatByTournament((prev) => ({
-          ...prev,
-          [tId]: [
-            ...(prev[tId] || []),
-            {
-              id: `tcr-${Date.now()}`,
-              author: responder.name,
-              text: replies[Math.floor(Math.random() * replies.length)],
-              time: new Date().toTimeString().slice(0, 5),
-            },
-          ],
-        }));
-      }, 650);
-    }
   };
 
   const activeLobbyMessages = useMemo(() => {
@@ -792,6 +1085,18 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
             <Shield className="w-3.5 h-3.5 text-indigo-500" />
             Team Battles
           </button>
+          <button
+            type="button"
+            onClick={() => setFormatFilter('knockout')}
+            className={`px-3.5 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5 whitespace-nowrap shrink-0 ${
+              formatFilter === 'knockout'
+                ? 'bg-white dark:bg-zinc-800 text-stone-900 dark:text-zinc-100 shadow-sm'
+                : 'text-stone-600 dark:text-zinc-400'
+            }`}
+          >
+            <Award className="w-3.5 h-3.5 text-rose-500" />
+            Knockout Cup
+          </button>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
@@ -808,7 +1113,7 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
           <button
             type="button"
             onClick={() => {
-              setNewFormat(formatFilter);
+              setNewFormat(formatFilter === 'knockout' ? 'arena' : formatFilter);
               setCreateOpen(true);
             }}
             className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0"
@@ -817,6 +1122,36 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
             Make Tournament
           </button>
         </div>
+      </div>
+
+      {/* Automated Hourly Arena Countdown Banner */}
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 rounded-xl bg-gradient-to-r from-emerald-50 to-amber-50/60 dark:from-emerald-950/40 dark:to-zinc-900 border border-emerald-200 dark:border-emerald-900/60">
+        <div className="flex items-center gap-2.5">
+          <Clock className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+          <div className="text-xs">
+            <span className="font-semibold text-stone-900 dark:text-zinc-100">
+              Next Hourly Blitz Arena starts in{' '}
+            </span>
+            <span className="font-mono font-bold tabular-nums text-emerald-700 dark:text-emerald-300">
+              {Math.floor(hourlyCountdownSec / 60)}:
+              {(hourlyCountdownSec % 60).toString().padStart(2, '0')}
+            </span>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => {
+            setFormatFilter('arena');
+            const target = tournaments.find((t) => t.id === 'arena-blitz') || tournaments[0];
+            if (target) {
+              setActiveId(target.id);
+              if (!target.joined) void toggleJoin(target);
+            }
+          }}
+          className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold whitespace-nowrap shrink-0"
+        >
+          Join Active Hourly Arena
+        </button>
       </div>
 
       {statusNotice && (
@@ -833,40 +1168,221 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        {/* Tournament Directory */}
-        <div className="lg:col-span-4 space-y-3">
-          {visibleTournaments.map((t) => (
-            <button
-              key={t.id}
-              type="button"
-              onClick={() => setActiveId(t.id)}
-              className={`w-full text-left p-4 rounded-xl border transition-colors space-y-1.5 ${
-                activeTournament?.id === t.id
-                  ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/30'
-                  : 'border-stone-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:bg-stone-50 dark:hover:bg-zinc-800/60'
-              }`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="text-sm font-semibold text-stone-900 dark:text-zinc-100 truncate">
-                  {t.name}
-                </span>
-                <span className="font-mono text-xs text-emerald-600 dark:text-emerald-400 shrink-0">
-                  {t.timeControl}
-                </span>
-              </div>
-              <div className="text-xs text-stone-500 dark:text-zinc-400">
-                {VARIANTS.find((v) => v.id === t.variant)?.name} · {t.players.length} players ·{' '}
-                {t.format === 'arena'
-                  ? `${t.durationMinutes}m Arena`
-                  : `Round ${t.currentRound}/${t.totalRounds}`}
-              </div>
-              {t.createdBy && (
-                <div className="text-[11px] font-mono text-stone-400 dark:text-zinc-500">
-                  Host: {t.createdBy}
+        {/* Left Sidebar: Tournament Directory + Persistent Global Chat Window */}
+        <div className="lg:col-span-4 space-y-5">
+          <div className="space-y-3">
+            {visibleTournaments.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setActiveId(t.id)}
+                className={`w-full text-left p-4 rounded-xl border transition-colors space-y-1.5 ${
+                  activeTournament?.id === t.id
+                    ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/30'
+                    : 'border-stone-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:bg-stone-50 dark:hover:bg-zinc-800/60'
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-sm font-semibold text-stone-900 dark:text-zinc-100 truncate">
+                    {t.name}
+                  </span>
+                  <span className="font-mono text-xs text-emerald-600 dark:text-emerald-400 shrink-0">
+                    {t.timeControl}
+                  </span>
                 </div>
-              )}
-            </button>
-          ))}
+                <div className="text-xs text-stone-500 dark:text-zinc-400">
+                  {VARIANTS.find((v) => v.id === t.variant)?.name} · {t.players.length} players ·{' '}
+                  {t.format === 'arena'
+                    ? `${t.durationMinutes}m Arena`
+                    : `Round ${t.currentRound}/${t.totalRounds}`}
+                </div>
+                {t.createdBy && (
+                  <div className="text-[11px] font-mono text-stone-400 dark:text-zinc-500">
+                    Host: {t.createdBy}
+                  </div>
+                )}
+              </button>
+            ))}
+          </div>
+
+          {/* Persistent Global Tournament Chat Window (always accessible during tournament browsing & live games) */}
+          <section
+            aria-label="Global Tournament Chat"
+            className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl overflow-hidden shadow-xs"
+          >
+            <div className="px-4 py-3 border-b border-stone-200 dark:border-zinc-800 flex items-center justify-between gap-2 bg-stone-50/80 dark:bg-zinc-950/60">
+              <div className="flex items-center gap-2 min-w-0">
+                <Globe className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                <div className="min-w-0">
+                  <h3 className="text-xs font-semibold text-stone-900 dark:text-zinc-100 truncate">
+                    Global Tournament Chat
+                  </h3>
+                  <p className="text-[11px] text-stone-500 dark:text-zinc-400 truncate">
+                    Discuss ongoing games · Posting as {effectiveUsername}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setGlobalChatOpen((o) => !o)}
+                className="p-1.5 rounded-md text-stone-500 hover:text-stone-900 dark:text-zinc-400 dark:hover:text-zinc-100 hover:bg-stone-200/60 dark:hover:bg-zinc-800 shrink-0"
+                title={globalChatOpen ? 'Minimize global chat' : 'Expand global chat'}
+                aria-expanded={globalChatOpen}
+              >
+                {globalChatOpen ? (
+                  <ChevronUp className="w-4 h-4" />
+                ) : (
+                  <ChevronDown className="w-4 h-4" />
+                )}
+              </button>
+            </div>
+
+            {globalChatOpen && (
+              <div className="p-3.5 space-y-3">
+                <div
+                  ref={globalChatScrollRef}
+                  className="h-64 overflow-y-auto thin-scroll space-y-2.5 p-2.5 rounded-lg bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800"
+                >
+                  {globalChatMessages.length === 0 ? (
+                    <div className="h-full flex items-center justify-center text-center px-3 text-xs text-stone-500 dark:text-zinc-400">
+                      No messages yet. Start a conversation about ongoing tournament games!
+                    </div>
+                  ) : (
+                    globalChatMessages.map((msg) => {
+                      const timeLabel = msg.createdAt
+                        ? new Date(msg.createdAt).toLocaleTimeString([], {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })
+                        : '';
+                      return (
+                        <div key={msg.id} className="text-xs leading-relaxed break-words">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {timeLabel && (
+                              <span className="font-mono text-[10px] text-stone-400">
+                                [{timeLabel}]
+                              </span>
+                            )}
+                            {msg.isGuest && (
+                              <User
+                                className="w-3 h-3 text-stone-400 dark:text-zinc-500 shrink-0"
+                                aria-hidden="true"
+                              />
+                            )}
+                            <span
+                              className={`font-semibold ${
+                                msg.isGuest
+                                  ? 'text-stone-700 dark:text-zinc-300 italic'
+                                  : 'text-stone-900 dark:text-zinc-100'
+                              }`}
+                            >
+                              {msg.author}
+                            </span>
+                            {msg.isGuest && (
+                              <span className="px-1 py-0.2 rounded border border-stone-200 dark:border-zinc-700 bg-stone-100 dark:bg-zinc-800 text-stone-600 dark:text-zinc-300 text-[9px] font-medium">
+                                Guest
+                              </span>
+                            )}
+                            {msg.tournamentTag && (
+                              <span className="text-[10px] font-mono text-emerald-700 dark:text-emerald-400 truncate max-w-[160px]">
+                                · {msg.tournamentTag}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-stone-700 dark:text-zinc-300 pl-0.5 mt-0.5">
+                            {msg.text}
+                          </div>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+
+                {globalChatError && (
+                  <div className="text-[11px] text-red-600 dark:text-red-400">
+                    {globalChatError}
+                  </div>
+                )}
+
+                {activeTournament && (
+                  <label className="flex items-center gap-1.5 text-[11px] text-stone-600 dark:text-zinc-400 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={tagCurrentTournament}
+                      onChange={(e) => setTagCurrentTournament(e.target.checked)}
+                      className="w-3.5 h-3.5 rounded accent-emerald-600 cursor-pointer"
+                    />
+                    <span className="truncate">
+                      Tag <strong className="font-medium text-stone-800 dark:text-zinc-200">{activeTournament.name}</strong>
+                    </span>
+                  </label>
+                )}
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {['🔥', '👏', '⚡', '♟️'].map((emoji) => (
+                    <button
+                      key={emoji}
+                      type="button"
+                      onClick={() => void sendGlobalChat(emoji)}
+                      className="px-2 py-1 rounded border border-stone-200 dark:border-zinc-700 text-xs hover:bg-stone-100 dark:hover:bg-zinc-800"
+                      title={`Send ${emoji} reaction`}
+                    >
+                      {emoji}
+                    </button>
+                  ))}
+                  {['glhf!', 'Sharp game!', 'Great endgame!'].map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => void sendGlobalChat(preset)}
+                      className="px-2 py-1 rounded border border-stone-200 dark:border-zinc-700 text-[11px] font-medium text-stone-600 dark:text-zinc-300 hover:bg-stone-100 dark:hover:bg-zinc-800"
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                  {activeTournament && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void sendGlobalChat(
+                          `Come join ${activeTournament.name} (${activeTournament.timeControl}, ${activeTournament.players.length} players)!`
+                        )
+                      }
+                      className="px-2 py-1 rounded border border-emerald-200 dark:border-emerald-800 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 hover:bg-emerald-50 dark:hover:bg-emerald-950/30 flex items-center gap-1"
+                    >
+                      <Share2 className="w-3 h-3" />
+                      Share Event
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={globalChatInput}
+                    onChange={(e) => setGlobalChatInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        void sendGlobalChat();
+                      }
+                    }}
+                    maxLength={300}
+                    placeholder="Discuss ongoing games..."
+                    className="flex-1 min-w-0 px-3 py-1.5 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-xs text-stone-900 dark:text-zinc-100"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => void sendGlobalChat()}
+                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold flex items-center gap-1 whitespace-nowrap shrink-0"
+                  >
+                    <Send className="w-3.5 h-3.5" />
+                    Send
+                  </button>
+                </div>
+              </div>
+            )}
+          </section>
         </div>
 
         {/* Active Tournament Lobby or Live Match */}
@@ -955,6 +1471,147 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                     {formatMatchClock(playingMatch.clockSec)}
                   </span>
                 </div>
+              </div>
+            </div>
+          ) : formatFilter === 'knockout' ? (
+            <div className="space-y-5">
+              <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-5 space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-bold text-stone-900 dark:text-zinc-100 flex items-center gap-2">
+                      <Award className="w-5 h-5 text-rose-500" />
+                      {knockoutCupTitle}
+                    </h2>
+                    <p className="text-xs text-stone-500 dark:text-zinc-400">
+                      8-Player Single-Elimination Knockout · 3+0 Blitz · Win 3 rounds to lift the trophy!
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setKnockoutCupTitle(`Caissa Knockout Cup #${Math.floor(10 + Math.random() * 89)}`);
+                      setKnockoutNodes(createInitialKnockoutBracket(effectiveUsername, authUser?.rating || 1620));
+                    }}
+                    className="px-3 py-1.5 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-semibold hover:bg-stone-50 dark:hover:bg-zinc-800"
+                  >
+                    New 8-Player Cup
+                  </button>
+                </div>
+
+                {knockoutNodes.find((n) => n.id === 'fin-1')?.winner && (
+                  <div className="p-4 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800 flex items-center gap-3">
+                    <Trophy className="w-6 h-6 text-amber-500 shrink-0" />
+                    <div className="text-xs">
+                      <div className="font-bold text-amber-900 dark:text-amber-200 text-sm">
+                        Champion Crowned: {knockoutNodes.find((n) => n.id === 'fin-1')?.winner?.name}
+                      </div>
+                      <div className="text-amber-800 dark:text-amber-300">
+                        Result archived to the Tournament Hall of Fame Podium!
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {([
+                    [1, 'Quarterfinals'],
+                    [2, 'Semifinals'],
+                    [3, 'Grand Final'],
+                  ] as const).map(([roundNum, label]) => (
+                    <div key={roundNum} className="space-y-3">
+                      <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 dark:text-zinc-400">
+                        {label}
+                      </div>
+                      {knockoutNodes
+                        .filter((n) => n.round === roundNum)
+                        .map((node) => {
+                          const canPlay =
+                            !node.winner &&
+                            Boolean(node.p1 && node.p2) &&
+                            Boolean(node.p1?.isUser || node.p2?.isUser);
+                          return (
+                            <div
+                              key={node.id}
+                              className="p-3 rounded-lg border border-stone-200 dark:border-zinc-800 bg-stone-50/70 dark:bg-zinc-950 space-y-2 text-xs"
+                            >
+                              {[node.p1, node.p2].map((pl, idx) => (
+                                <div
+                                  key={idx}
+                                  className={`flex items-center justify-between px-2 py-1 rounded ${
+                                    node.winner && pl && node.winner.name === pl.name
+                                      ? 'bg-emerald-100 dark:bg-emerald-950/50 font-bold text-emerald-900 dark:text-emerald-200'
+                                      : pl?.isUser
+                                      ? 'font-semibold text-stone-900 dark:text-zinc-100'
+                                      : 'text-stone-600 dark:text-zinc-400'
+                                  }`}
+                                >
+                                  <span className="truncate">{pl ? pl.name : 'TBD'}</span>
+                                  {pl && <span className="font-mono text-[11px]">{pl.rating}</span>}
+                                </div>
+                              ))}
+                              {canPlay && (
+                                <button
+                                  type="button"
+                                  onClick={() => startKnockoutMatch(node)}
+                                  className="w-full py-1.5 rounded bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-semibold"
+                                >
+                                  Play {roundNum === 3 ? 'Final' : roundNum === 2 ? 'Semifinal' : 'Quarterfinal'}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              {/* Hall of Fame Podium */}
+              <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-stone-900 dark:text-zinc-100 flex items-center gap-2">
+                    <Medal className="w-4 h-4 text-amber-500" />
+                    Tournament Hall of Fame Podium
+                  </h3>
+                  <span className="text-[11px] font-mono text-stone-400">
+                    {hallOfFame.length} archived
+                  </span>
+                </div>
+                {hallOfFame.length === 0 ? (
+                  <p className="text-xs text-stone-500 dark:text-zinc-400">
+                    Complete a Swiss Championship or Knockout Cup to immortalize top 3 finishers here.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {hallOfFame.slice(0, 6).map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="p-3 rounded-lg border border-stone-200 dark:border-zinc-800 bg-stone-50 dark:bg-zinc-950 space-y-2 text-xs"
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-semibold text-stone-900 dark:text-zinc-100 truncate">
+                            {entry.tournamentName}
+                          </span>
+                          <span className="text-[10px] font-mono uppercase text-emerald-600 dark:text-emerald-400">
+                            {entry.format}
+                          </span>
+                        </div>
+                        <div className="space-y-1">
+                          {entry.podium.map((p) => (
+                            <div key={p.rank} className="flex items-center justify-between">
+                              <span className="text-stone-700 dark:text-zinc-300">
+                                {p.rank === 1 ? '🥇' : p.rank === 2 ? '🥈' : '🥉'} {p.name}
+                              </span>
+                              <span className="font-mono text-[11px] text-stone-500">
+                                {p.score} pts
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           ) : (
@@ -1060,6 +1717,28 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                       >
                         <Zap className="w-3.5 h-3.5" />
                         Berserk
+                      </button>
+                    )}
+                    {sortedStandings.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void archiveToHallOfFame(
+                            `${activeTournament.id}-${Date.now()}`,
+                            activeTournament.name,
+                            activeTournament.format,
+                            sortedStandings.slice(0, 3).map((p) => ({
+                              name: p.name,
+                              isGuest: p.isUser && !authUser,
+                              score: p.score,
+                            }))
+                          )
+                        }
+                        className="px-3 py-2 rounded-lg border border-amber-300 dark:border-amber-800 text-amber-700 dark:text-amber-300 text-xs font-semibold flex items-center gap-1 whitespace-nowrap shrink-0 hover:bg-amber-50 dark:hover:bg-amber-950/30"
+                        title="Archive current podium snapshot to the Hall of Fame"
+                      >
+                        <Medal className="w-3.5 h-3.5" />
+                        Archive Podium
                       </button>
                     )}
                   </div>
@@ -1185,45 +1864,56 @@ export const TournamentsView: React.FC<TournamentsViewProps> = ({
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-stone-100 dark:divide-zinc-800/70">
-                        {sortedStandings.map((pl, idx) => (
-                          <tr
-                            key={pl.id}
-                            className={
-                              pl.isUser ? 'bg-emerald-50/70 dark:bg-emerald-950/25 font-semibold' : ''
-                            }
-                          >
-                            <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-500 dark:text-zinc-400">
-                              {idx + 1}
-                            </td>
-                            <td className="py-2.5 pr-3 text-stone-900 dark:text-zinc-100">
-                              {pl.name}
-                              {pl.streak >= 2 && activeTournament.format === 'arena' && (
-                                <span className="ml-2 text-amber-500 font-mono">
-                                  ({pl.streak} streak)
-                                </span>
-                              )}
-                            </td>
-                            {activeTournament.isTeamBattle && (
-                              <td className="py-2.5 pr-3 text-stone-600 dark:text-zinc-400">
-                                {pl.team || 'Open'}
-                              </td>
-                            )}
-                            <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-600 dark:text-zinc-400">
-                              {pl.rating}
-                            </td>
-                            <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-600 dark:text-zinc-400">
-                              {pl.gamesPlayed}
-                            </td>
-                            {activeTournament.format === 'swiss' && (
-                              <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-600 dark:text-zinc-400">
-                                {(pl.buchholz || 0).toFixed(1)}
-                              </td>
-                            )}
-                            <td className="py-2.5 text-right font-mono tabular-nums font-bold text-stone-900 dark:text-zinc-100">
-                              {pl.score}
+                        {sortedStandings.length === 0 ? (
+                          <tr>
+                            <td
+                              colSpan={activeTournament.isTeamBattle ? 7 : 6}
+                              className="py-5 text-center text-xs text-stone-500 dark:text-zinc-400"
+                            >
+                              No human players in this tournament standings yet. Join above to compete.
                             </td>
                           </tr>
-                        ))}
+                        ) : (
+                          sortedStandings.map((pl, idx) => (
+                            <tr
+                              key={pl.id}
+                              className={
+                                pl.isUser ? 'bg-emerald-50/70 dark:bg-emerald-950/25 font-semibold' : ''
+                              }
+                            >
+                              <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-500 dark:text-zinc-400">
+                                {idx + 1}
+                              </td>
+                              <td className="py-2.5 pr-3 text-stone-900 dark:text-zinc-100">
+                                {pl.name}
+                                {pl.streak >= 2 && activeTournament.format === 'arena' && (
+                                  <span className="ml-2 text-amber-500 font-mono">
+                                    ({pl.streak} streak)
+                                  </span>
+                                )}
+                              </td>
+                              {activeTournament.isTeamBattle && (
+                                <td className="py-2.5 pr-3 text-stone-600 dark:text-zinc-400">
+                                  {pl.team || 'Open'}
+                                </td>
+                              )}
+                              <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-600 dark:text-zinc-400">
+                                {pl.rating}
+                              </td>
+                              <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-600 dark:text-zinc-400">
+                                {pl.gamesPlayed}
+                              </td>
+                              {activeTournament.format === 'swiss' && (
+                                <td className="py-2.5 pr-3 font-mono tabular-nums text-stone-600 dark:text-zinc-400">
+                                  {(pl.buchholz || 0).toFixed(1)}
+                                </td>
+                              )}
+                              <td className="py-2.5 text-right font-mono tabular-nums font-bold text-stone-900 dark:text-zinc-100">
+                                {pl.score}
+                              </td>
+                            </tr>
+                          ))
+                        )}
                       </tbody>
                     </table>
                     </div>

@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  AuthUser,
   BoardState,
   ChessVariant,
+  ClubInfo,
   DirectMessage,
   ForumPost,
   Friend,
   GameRecord,
+  LiveGameSummary,
   Move,
   RatingCategory,
   Team,
@@ -44,18 +47,26 @@ import {
   Newspaper,
   Plus,
   Radio,
+  RefreshCw,
   Search,
   Send,
+  Shield,
   Swords,
+  Trophy,
   Tv,
+  User,
   Users,
 } from 'lucide-react';
 
 interface CommunityViewProps {
   prefs: UserPreferences;
+  authUser?: AuthUser | null;
+  authToken?: string | null;
+  visitorId?: string;
   games?: GameRecord[];
   userRatings?: UserRatings;
   onChallengeStart: (variant: ChessVariant) => void;
+  onSpectateLiveRoom?: (roomId: string) => void;
   onSendToAnalysis: (payload: { moves: Move[]; fens: string[]; variant: ChessVariant }) => void;
 }
 
@@ -267,14 +278,21 @@ const LIVE_STREAMERS: StreamerInfo[] = [
 
 export const CommunityView: React.FC<CommunityViewProps> = ({
   prefs,
+  authUser = null,
+  authToken = null,
+  visitorId = '',
   games = [],
   userRatings,
   onChallengeStart,
+  onSpectateLiveRoom,
   onSendToAnalysis,
 }) => {
+  const effectiveUsername = authUser ? authUser.username : 'Anonymous';
   const [subTab, setSubTab] = useState<CommSubTab>('tv');
 
-  // ==================== LIVE TV STATE ====================
+  // ==================== LIVE TV & LIVE HUMAN ROOMS STATE ====================
+  const [liveRooms, setLiveRooms] = useState<LiveGameSummary[]>([]);
+  const [loadingLiveRooms, setLoadingLiveRooms] = useState(false);
   const [channelIdx, setChannelIdx] = useState(0);
   const activeChannel = TV_CHANNELS[channelIdx];
   const [tvState, setTvState] = useState<BoardState>(() => createInitialState(activeChannel.variant));
@@ -282,6 +300,30 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
   const [tvFens, setTvFens] = useState<string[]>(() => [toFen(createInitialState(activeChannel.variant))]);
   const [tvEval, setTvEval] = useState(0);
   const [tvFlipped, setTvFlipped] = useState(false);
+
+  const fetchLiveRooms = async () => {
+    setLoadingLiveRooms(true);
+    try {
+      const resp = await fetch('/api/live-games');
+      if (resp.ok) {
+        const data = await resp.json();
+        if (Array.isArray(data?.games)) {
+          setLiveRooms(data.games);
+        }
+      }
+    } catch {
+      // ignore offline
+    } finally {
+      setLoadingLiveRooms(false);
+    }
+  };
+
+  useEffect(() => {
+    if (subTab !== 'tv') return;
+    void fetchLiveRooms();
+    const id = window.setInterval(() => void fetchLiveRooms(), 8000);
+    return () => window.clearInterval(id);
+  }, [subTab]);
 
   // ==================== STREAMERS LIVE PREVIEW STATE ====================
   const [streamerIdx, setStreamerIdx] = useState(0);
@@ -360,7 +402,9 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
     return () => window.clearInterval(id);
   }, [subTab, activeChannel.variant]);
 
-  // ==================== TEAMS STATE ====================
+  // ==================== TEAMS & CLUB WARS LEADERBOARD ====================
+  const [clubs, setClubs] = useState<ClubInfo[]>([]);
+  const [clubNotice, setClubNotice] = useState<string | null>(null);
   const [teams, setTeams] = useState<Team[]>(() => {
     try {
       const raw = localStorage.getItem('caissa_teams_v1');
@@ -381,8 +425,73 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
     }
   }, [teams]);
 
-  const createTeam = () => {
+  const fetchClubs = async () => {
+    try {
+      const resp = await fetch('/api/clubs');
+      if (resp.ok) {
+        const data = await resp.json();
+        if (Array.isArray(data?.clubs)) {
+          setClubs(data.clubs);
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    if (subTab === 'teams') {
+      void fetchClubs();
+    }
+  }, [subTab]);
+
+  const handleJoinClub = async (clubId: string) => {
+    setClubNotice(null);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers.Authorization = `Bearer ${authToken}`;
+      const resp = await fetch(`/api/clubs/${encodeURIComponent(clubId)}/join`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ visitorId }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data?.club) {
+        await fetchClubs();
+      } else {
+        setClubNotice(data?.error || 'Could not update club membership.');
+      }
+    } catch {
+      setClubNotice('Network error updating club membership.');
+    }
+  };
+
+  const createTeam = async () => {
     if (!newTeamName.trim()) return;
+    setClubNotice(null);
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) headers.Authorization = `Bearer ${authToken}`;
+      const resp = await fetch('/api/clubs', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          name: newTeamName.trim(),
+          description: newTeamDesc.trim() || 'Community-organized Caissa chess club.',
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data?.club) {
+        await fetchClubs();
+        setNewTeamName('');
+        setNewTeamDesc('');
+        setClubNotice(`Founded "${data.club.name}" (+50 Club War pts)!`);
+        return;
+      }
+    } catch {
+      // fallback to local
+    }
+
     const t: Team = {
       id: `team-${Date.now()}`,
       name: newTeamName.trim(),
@@ -501,44 +610,138 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
   );
 
   const [leaderCategory, setLeaderCategory] = useState<RatingCategory>('blitz');
+  const [hideBots, setHideBots] = useState<boolean>(true);
   const [playerSearch, setPlayerSearch] = useState('');
   const [coachSearch, setCoachSearch] = useState('');
   const [coachLang, setCoachLang] = useState('All');
+  const [serverPlayers, setServerPlayers] = useState<
+    { id: string; username: string; rating: number; isBot?: boolean; source?: string }[]
+  >([]);
 
-  const isUserBot = isBotAccount({ name: prefs.username, isBot: prefs.isBot });
+  useEffect(() => {
+    let cancelled = false;
+    const fetchLeaderboard = () => {
+      const params = new URLSearchParams({
+        category: leaderCategory,
+      });
+      if (!hideBots) {
+        params.set('includeBots', '1');
+      }
+      fetch(`/api/leaderboard?${params.toString()}`)
+        .then((r) => (r.ok ? r.json() : null))
+        .then(
+          (
+            data: {
+              players?: {
+                id: string;
+                username: string;
+                rating: number;
+                isBot?: boolean;
+                source?: string;
+              }[];
+            } | null
+          ) => {
+            if (!cancelled && Array.isArray(data?.players)) {
+              setServerPlayers(data.players);
+            }
+          }
+        )
+        .catch(() => {
+          // Offline / static fallback
+        });
+    };
+
+    fetchLeaderboard();
+    window.addEventListener('caissa:leaderboard-updated', fetchLeaderboard);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('caissa:leaderboard-updated', fetchLeaderboard);
+    };
+  }, [
+    leaderCategory,
+    hideBots,
+    authUser?.id,
+    authUser?.username,
+    visitorId,
+    prefs.isBot,
+    userRatings?.bullet,
+    userRatings?.blitz,
+    userRatings?.rapid,
+    userRatings?.classical,
+    userRatings?.chess960,
+  ]);
+
+  const isUserBot = isBotAccount({
+    name: authUser ? authUser.username : '',
+    isBot: Boolean(prefs.isBot || authUser?.isBot),
+  });
 
   const leaderboardRows = useMemo(() => {
     const userScore = userRatings ? userRatings[leaderCategory] : 1620;
-    const baseOffsets: Record<RatingCategory, number> = {
-      bullet: 120,
-      blitz: 0,
-      rapid: -40,
-      classical: -80,
-      chess960: -140,
-    };
-    const off = baseOffsets[leaderCategory];
-    const entries = [
-      { name: 'GM_Aurelia', title: 'GM', rating: 2740 + off, country: 'FR', isBot: false, isUser: false },
-      { name: 'GM_Kenji', title: 'GM', rating: 2695 + off, country: 'JP', isBot: false, isUser: false },
-      { name: 'IM_Soren', title: 'IM', rating: 2560 + off, country: 'SE', isBot: false, isUser: false },
-      { name: 'WGM_Elena', title: 'WGM', rating: 2430 + off, country: 'DE', isBot: false, isUser: false },
-      { name: 'Marcus_960', title: 'FM', rating: 2295 + off, country: 'US', isBot: false, isUser: false },
-      { name: 'Elena_Tactics', title: '', rating: 1980 + off, country: 'IN', isBot: false, isUser: false },
-      {
-        name: prefs.username,
+
+    const entries: {
+      name: string;
+      title: string;
+      rating: number;
+      country: string;
+      isBot: boolean;
+      isUser: boolean;
+      isGuest: boolean;
+    }[] = serverPlayers.map((u) => {
+      const bot = isBotAccount({ username: u.username, isBot: u.isBot });
+      const isCurrentUser = authUser
+        ? u.source === 'account' &&
+          (u.id === authUser.id || u.username.toLowerCase() === authUser.username.toLowerCase())
+        : Boolean(visitorId && u.source === 'visitor' && u.id === visitorId);
+      const isGuest = u.source === 'visitor' || (!authUser && isCurrentUser);
+      const displayName = isGuest ? 'Anonymous' : u.username;
+      return {
+        name: displayName,
+        title: bot ? 'BOT' : '',
+        rating: isCurrentUser ? userScore : u.rating,
+        country: isCurrentUser ? 'YOU' : isGuest ? 'ANON' : 'CAISSA',
+        isBot: bot,
+        isUser: isCurrentUser,
+        isGuest,
+      };
+    });
+
+    const hasCurrentUser = entries.some((e) => e.isUser);
+    if (!hasCurrentUser) {
+      const isGuestUser = !authUser;
+      entries.push({
+        name: effectiveUsername,
         title: isUserBot ? 'BOT' : '',
         rating: userScore,
         country: 'YOU',
         isBot: isUserBot,
         isUser: true,
-      },
-    ];
+        isGuest: isGuestUser,
+      });
+    }
+
     const q = playerSearch.trim().toLowerCase();
     return entries
-      .filter((e) => !isBotAccount(e))
+      .filter((e) => !hideBots || !isBotAccount(e))
       .sort((a, b) => b.rating - a.rating)
-      .filter((e) => !q || e.name.toLowerCase().includes(q) || e.country.toLowerCase().includes(q));
-  }, [leaderCategory, prefs.username, isUserBot, userRatings, playerSearch]);
+      .filter(
+        (e) =>
+          !q ||
+          e.name.toLowerCase().includes(q) ||
+          e.country.toLowerCase().includes(q) ||
+          (e.isGuest && 'guest'.includes(q))
+      );
+  }, [
+    leaderCategory,
+    hideBots,
+    authUser,
+    visitorId,
+    effectiveUsername,
+    isUserBot,
+    userRatings,
+    playerSearch,
+    serverPlayers,
+  ]);
 
   const handleExportAllGamesPgn = () => {
     if (games.length === 0) return;
@@ -547,7 +750,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${prefs.username}-all-games-${new Date().toISOString().slice(0, 10)}.pgn`;
+    a.download = `${effectiveUsername}-all-games-${new Date().toISOString().slice(0, 10)}.pgn`;
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -979,52 +1182,111 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
               </div>
             </div>
 
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-              <input
-                type="text"
-                value={playerSearch}
-                onChange={(e) => setPlayerSearch(e.target.value)}
-                placeholder="Search player handle or country..."
-                className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-xs text-stone-900 dark:text-zinc-100"
-              />
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative flex-1 min-w-[180px]">
+                <Search className="w-3.5 h-3.5 text-stone-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={playerSearch}
+                  onChange={(e) => setPlayerSearch(e.target.value)}
+                  placeholder="Search player handle or tag..."
+                  className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-xs text-stone-900 dark:text-zinc-100"
+                />
+              </div>
+              <label className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-xs font-medium text-stone-700 dark:text-zinc-200 cursor-pointer select-none whitespace-nowrap shrink-0">
+                <input
+                  type="checkbox"
+                  checked={hideBots}
+                  onChange={(e) => setHideBots(e.target.checked)}
+                  className="w-3.5 h-3.5 rounded accent-emerald-600 cursor-pointer"
+                />
+                <span>Hide Bots</span>
+              </label>
             </div>
 
-            <div className="text-[11px] text-stone-500 dark:text-zinc-400 flex items-center justify-between gap-2">
-              <span>Human players only · Bots are not allowed in leaderboards</span>
+            <div className="text-[11px] text-stone-500 dark:text-zinc-400 flex flex-wrap items-center justify-between gap-2">
+              <span>
+                {hideBots
+                  ? 'Human players only · Everyone worldwide except bots'
+                  : 'Showing all accounts · Unchecked Hide Bots'}
+              </span>
+              <span className="font-mono tabular-nums font-medium text-stone-600 dark:text-zinc-300">
+                {leaderboardRows.length.toLocaleString()}{' '}
+                {leaderboardRows.length === 1 ? 'player' : 'players'} · Unlimited
+              </span>
             </div>
 
-            {isUserBot && (
+            {isUserBot && hideBots && (
               <div className="px-3 py-2 rounded-lg border border-amber-200 dark:border-amber-900 bg-amber-50/80 dark:bg-amber-950/30 text-xs text-amber-800 dark:text-amber-200">
-                Your account (<span className="font-mono font-semibold">{prefs.username}</span>) is flagged as a BOT and is excluded from all leaderboards.
+                Your account (<span className="font-mono font-semibold">{effectiveUsername}</span>) is flagged as a BOT and is hidden while Hide Bots is enabled.
               </div>
             )}
 
-            <div className="divide-y divide-stone-100 dark:divide-zinc-800">
-              {leaderboardRows.map((row, idx) => (
-                <div
-                  key={`${row.name}-${idx}`}
-                  className={`py-2.5 px-2.5 rounded flex items-center justify-between text-xs ${
-                    row.isUser
-                      ? 'bg-emerald-50/70 dark:bg-emerald-950/30 font-semibold'
-                      : ''
-                  }`}
-                >
-                  <div className="flex items-center gap-3 min-w-0">
-                    <span className="font-mono tabular-nums text-stone-400 w-5">
-                      #{idx + 1}
-                    </span>
-                    <span className="text-stone-900 dark:text-zinc-100 truncate">
-                      {row.title ? `${row.title} ` : ''}
-                      {row.name}
-                    </span>
-                    <span className="text-[11px] font-mono text-stone-400">{row.country}</span>
-                  </div>
-                  <span className="font-mono font-bold tabular-nums text-stone-900 dark:text-zinc-100">
-                    {row.rating}
-                  </span>
+            <div className="divide-y divide-stone-100 dark:divide-zinc-800 max-h-[480px] overflow-y-auto thin-scroll pr-1">
+              {leaderboardRows.length === 0 ? (
+                <div className="py-6 text-center text-xs text-stone-500 dark:text-zinc-400">
+                  No human players on the leaderboard yet.
                 </div>
-              ))}
+              ) : (
+                leaderboardRows.map((row, idx) => (
+                  <div
+                    key={`${row.name}-${idx}`}
+                    className={`py-2.5 px-2.5 rounded flex items-center justify-between text-xs ${
+                      row.isUser
+                        ? 'bg-emerald-50/70 dark:bg-emerald-950/30 font-semibold'
+                        : ''
+                    }`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <span className="font-mono tabular-nums text-stone-400 w-7 shrink-0">
+                        #{idx + 1}
+                      </span>
+                      {row.isGuest && (
+                        <User
+                          className="w-3.5 h-3.5 text-stone-400 dark:text-zinc-500 shrink-0"
+                          aria-label="Unregistered guest player"
+                        />
+                      )}
+                      <span
+                        className={`truncate ${
+                          row.isGuest
+                            ? 'text-stone-700 dark:text-zinc-300 italic'
+                            : 'text-stone-900 dark:text-zinc-100'
+                        }`}
+                      >
+                        {row.name}
+                      </span>
+                      {row.isGuest && (
+                        <span
+                          className="px-1.5 py-0.5 rounded border border-stone-200 dark:border-zinc-700 bg-stone-100 dark:bg-zinc-800 text-stone-600 dark:text-zinc-300 text-[10px] font-medium shrink-0"
+                          title="Unregistered player without an account"
+                        >
+                          Guest
+                        </span>
+                      )}
+                      {row.isBot && (
+                        <span className="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950 text-amber-700 dark:text-amber-300 text-[10px] font-mono font-semibold shrink-0">
+                          BOT
+                        </span>
+                      )}
+                      {(!row.isGuest || row.isUser) && (
+                        <span
+                          className={`text-[11px] font-mono shrink-0 ${
+                            row.isUser
+                              ? 'text-emerald-700 dark:text-emerald-400 font-semibold'
+                              : 'text-stone-400'
+                          }`}
+                        >
+                          {row.country}
+                        </span>
+                      )}
+                    </div>
+                    <span className="font-mono font-bold tabular-nums text-stone-900 dark:text-zinc-100 shrink-0">
+                      {row.rating}
+                    </span>
+                  </div>
+                ))
+              )}
             </div>
           </div>
 
@@ -1033,7 +1295,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h2 className="text-base font-semibold text-stone-900 dark:text-zinc-100 flex items-center gap-2">
-                  <span>{prefs.username} · Player Profile</span>
+                  <span>{effectiveUsername} · Player Profile</span>
                   {isUserBot && (
                     <span className="px-1.5 py-0.5 rounded bg-amber-100 dark:bg-amber-950/60 border border-amber-300 dark:border-amber-800 text-amber-800 dark:text-amber-300 font-mono text-[10px] font-bold">
                       BOT
@@ -1042,6 +1304,7 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
                 </h2>
                 <p className="text-xs text-stone-500 dark:text-zinc-400">
                   {games.length} total recorded games · {userWdlStats.w}W / {userWdlStats.d}D / {userWdlStats.l}L
+                  {!authUser ? ' · Guest mode (listed as Anonymous)' : ''}
                   {isUserBot ? ' · Excluded from leaderboards' : ''}
                 </p>
               </div>
@@ -1293,31 +1556,92 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
 
       {/* ==================== LIVE TV ==================== */}
       {subTab === 'tv' && (
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-          <div className="lg:col-span-4 space-y-2.5">
-            <h2 className="text-base font-semibold text-stone-900 dark:text-zinc-100">
-              Live Broadcast Channels
-            </h2>
-            {TV_CHANNELS.map((ch, idx) => (
+        <div className="space-y-6">
+          <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-4 space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <h2 className="text-sm font-bold text-stone-900 dark:text-zinc-100 flex items-center gap-2">
+                  <Tv className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                  Live Human Arenas (Spectator TV)
+                </h2>
+                <p className="text-xs text-stone-500 dark:text-zinc-400">
+                  Watch active 1v1 multiplayer games in real time and join spectator kibitz chat.
+                </p>
+              </div>
               <button
-                key={ch.id}
                 type="button"
-                onClick={() => setChannelIdx(idx)}
-                className={`w-full text-left p-3.5 rounded-xl border transition-colors ${
-                  idx === channelIdx
-                    ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/30'
-                    : 'border-stone-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:bg-stone-50 dark:hover:bg-zinc-800/50'
-                }`}
+                onClick={() => void fetchLiveRooms()}
+                className="px-2.5 py-1.5 rounded-lg border border-stone-200 dark:border-zinc-700 text-xs font-medium flex items-center gap-1 hover:bg-stone-50 dark:hover:bg-zinc-800"
               >
-                <div className="text-sm font-semibold text-stone-900 dark:text-zinc-100">
-                  {ch.label}
-                </div>
-                <div className="text-xs text-stone-500 dark:text-zinc-400 mt-1">
-                  {ch.white} vs {ch.black}
-                </div>
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingLiveRooms ? 'animate-spin' : ''}`} />
+                Refresh
               </button>
-            ))}
+            </div>
+            {liveRooms.length === 0 ? (
+              <div className="text-xs text-stone-500 dark:text-zinc-400 py-2">
+                No live human multiplayer rooms are currently underway. Start a 1v1 Arena match in Play or watch featured studio channels below.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {liveRooms.map((room) => (
+                  <div
+                    key={room.roomId}
+                    className="p-3.5 rounded-xl border border-stone-200 dark:border-zinc-800 bg-stone-50 dark:bg-zinc-950 flex flex-col justify-between gap-2.5 text-xs"
+                  >
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between font-mono text-[11px] text-stone-500">
+                        <span>
+                          {room.variant} · {room.timeControl}
+                        </span>
+                        <span>{room.spectatorCount} watching</span>
+                      </div>
+                      <div className="font-semibold text-stone-900 dark:text-zinc-100">
+                        {room.whiteName} vs {room.blackName}
+                      </div>
+                      <div className="text-[11px] text-stone-500">
+                        {room.moveCount} plies · {room.status}
+                      </div>
+                    </div>
+                    {onSpectateLiveRoom && (
+                      <button
+                        type="button"
+                        onClick={() => onSpectateLiveRoom(room.roomId)}
+                        className="w-full py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-semibold"
+                      >
+                        Spectate Live
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+            <div className="lg:col-span-4 space-y-2.5">
+              <h2 className="text-base font-semibold text-stone-900 dark:text-zinc-100">
+                Studio Showcase Channels
+              </h2>
+              {TV_CHANNELS.map((ch, idx) => (
+                <button
+                  key={ch.id}
+                  type="button"
+                  onClick={() => setChannelIdx(idx)}
+                  className={`w-full text-left p-3.5 rounded-xl border transition-colors ${
+                    idx === channelIdx
+                      ? 'border-emerald-600 bg-emerald-50/70 dark:bg-emerald-950/30'
+                      : 'border-stone-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:bg-stone-50 dark:hover:bg-zinc-800/50'
+                  }`}
+                >
+                  <div className="text-sm font-semibold text-stone-900 dark:text-zinc-100">
+                    {ch.label}
+                  </div>
+                  <div className="text-xs text-stone-500 dark:text-zinc-400 mt-1">
+                    {ch.white} vs {ch.black}
+                  </div>
+                </button>
+              ))}
+            </div>
 
           <div className="lg:col-span-8 flex flex-col items-center gap-3">
             <div className="w-full max-w-[560px] flex items-center justify-between px-3 py-2 rounded-lg bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 text-xs">
@@ -1377,12 +1701,83 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
             </div>
           </div>
         </div>
+        </div>
       )}
 
-      {/* ==================== TEAMS ==================== */}
+      {/* ==================== TEAMS & CLUB WARS ==================== */}
       {subTab === 'teams' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-          <div className="lg:col-span-8 space-y-3">
+          <div className="lg:col-span-8 space-y-5">
+            {/* Global Club Wars Leaderboard */}
+            <div className="bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-5 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-base font-bold text-stone-900 dark:text-zinc-100 flex items-center gap-2">
+                    <Trophy className="w-4 h-4 text-amber-500" />
+                    Global Club Wars Leaderboard
+                  </h2>
+                  <p className="text-xs text-stone-500 dark:text-zinc-400">
+                    Join a persistent club to earn war points whenever you recruit members or compete.
+                  </p>
+                </div>
+                <span className="text-xs font-mono text-stone-500">
+                  {clubs.length} clubs
+                </span>
+              </div>
+
+              {clubNotice && (
+                <div className="px-3 py-2 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-900 text-xs text-emerald-800 dark:text-emerald-200">
+                  {clubNotice}
+                </div>
+              )}
+
+              <div className="divide-y divide-stone-100 dark:divide-zinc-800">
+                {clubs.map((club, idx) => {
+                  const memberKey = authUser
+                    ? authUser.username
+                    : visitorId
+                    ? `Guest-${visitorId.slice(-4)}`
+                    : 'Anonymous';
+                  const isMember = club.members.includes(memberKey);
+                  return (
+                    <div
+                      key={club.id}
+                      className="py-3 flex flex-wrap items-center justify-between gap-3"
+                    >
+                      <div className="min-w-0 space-y-0.5">
+                        <div className="flex items-center gap-2">
+                          <span className="font-mono text-xs text-stone-400 w-5">
+                            #{idx + 1}
+                          </span>
+                          <Shield className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                          <span className="text-sm font-bold text-stone-900 dark:text-zinc-100">
+                            {club.name}
+                          </span>
+                          <span className="font-mono text-xs font-bold text-emerald-600 dark:text-emerald-400">
+                            {club.totalScore} pts
+                          </span>
+                        </div>
+                        <div className="text-xs text-stone-500 dark:text-zinc-400 pl-7">
+                          {club.memberCount} members · Founded by {club.createdBy} · {club.description}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void handleJoinClub(club.id)}
+                        className={`px-3.5 py-1.5 rounded-lg text-xs font-semibold border whitespace-nowrap shrink-0 ${
+                          isMember
+                            ? 'border-stone-300 dark:border-zinc-700 text-stone-700 dark:text-zinc-300'
+                            : 'border-emerald-600 bg-emerald-600 text-white'
+                        }`}
+                      >
+                        {isMember ? 'Joined (Leave)' : 'Join Club War'}
+                      </button>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
             {teams.map((team) => (
               <div
                 key={team.id}
@@ -1428,29 +1823,29 @@ export const CommunityView: React.FC<CommunityViewProps> = ({
 
           <div className="lg:col-span-4 bg-white dark:bg-zinc-900 border border-stone-200 dark:border-zinc-800 rounded-xl p-5 space-y-3">
             <h3 className="text-sm font-semibold text-stone-900 dark:text-zinc-100">
-              Create New Team
+              Found New Club
             </h3>
             <input
               type="text"
               value={newTeamName}
               onChange={(e) => setNewTeamName(e.target.value)}
-              placeholder="Team name..."
+              placeholder="Club name..."
               className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-xs"
             />
             <textarea
               rows={3}
               value={newTeamDesc}
               onChange={(e) => setNewTeamDesc(e.target.value)}
-              placeholder="Team focus, weekly arenas, or description..."
+              placeholder="Club focus, weekly arenas, or description..."
               className="w-full px-3 py-2 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-950 text-xs"
             />
             <button
               type="button"
-              onClick={createTeam}
+              onClick={() => void createTeam()}
               className="w-full py-2 rounded-lg bg-emerald-600 text-white text-xs font-semibold flex items-center justify-center gap-1"
             >
               <Plus className="w-4 h-4" />
-              Create Team
+              Found Club
             </button>
           </div>
         </div>

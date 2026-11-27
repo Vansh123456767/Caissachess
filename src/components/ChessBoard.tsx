@@ -73,6 +73,38 @@ export const BOARD_THEMES: Record<
     coordLight: '#52525b',
     coordDark: '#f4f4f5',
   },
+  emerald: {
+    name: 'Emerald Marble',
+    light: '#e2f1e7',
+    dark: '#2c6e49',
+    lastMove: 'rgba(250, 204, 21, 0.45)',
+    coordLight: '#1e4d33',
+    coordDark: '#e2f1e7',
+  },
+  midnight: {
+    name: 'Midnight Neon',
+    light: '#273248',
+    dark: '#141a29',
+    lastMove: 'rgba(56, 189, 248, 0.4)',
+    coordLight: '#94a3b8',
+    coordDark: '#cbd5e1',
+  },
+  rosewood: {
+    name: 'Tournament Rosewood',
+    light: '#f3dccb',
+    dark: '#8d3b32',
+    lastMove: 'rgba(251, 191, 36, 0.45)',
+    coordLight: '#6b2720',
+    coordDark: '#f3dccb',
+  },
+  glass: {
+    name: 'Minimalist Glass',
+    light: '#f8fafc',
+    dark: '#cbd5e1',
+    lastMove: 'rgba(16, 185, 129, 0.35)',
+    coordLight: '#64748b',
+    coordDark: '#334155',
+  },
 };
 
 export interface QueuedPremove {
@@ -107,6 +139,11 @@ interface ChessBoardProps {
   onUpdateAnnotations?: (next: BoardAnnotation) => void;
   allowAnnotations?: boolean;
   maxWidthClass?: string;
+  fogVisibleSquares?: Set<string> | null;
+  duckSquare?: string | null;
+  awaitingDuckPlacement?: boolean;
+  onDuckPlace?: (sq: string) => void;
+  restrictedPieceType?: PieceType | null;
 }
 
 export const ChessBoard: React.FC<ChessBoardProps> = ({
@@ -136,6 +173,11 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   onUpdateAnnotations,
   allowAnnotations = false,
   maxWidthClass = 'max-w-[540px]',
+  fogVisibleSquares = null,
+  duckSquare = null,
+  awaitingDuckPlacement = false,
+  onDuckPlace,
+  restrictedPieceType = null,
 }) => {
   const [selectedSq, setSelectedSq] = useState<[number, number] | null>(null);
   const [selectedDrop, setSelectedDrop] = useState<Exclude<PieceType, 'k'> | null>(null);
@@ -156,10 +198,18 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   const theme = BOARD_THEMES[boardTheme] || BOARD_THEMES.wood;
 
   const legalMoves = useMemo(() => {
-    if (!interactive) return [];
+    if (!interactive || awaitingDuckPlacement) return [];
     if (allowedColor !== 'both' && state.turn !== allowedColor) return [];
-    return getLegalMoves(state);
-  }, [state, interactive, allowedColor]);
+    const base = getLegalMoves(state);
+    return base.filter((m) => {
+      if (restrictedPieceType && m.piece !== restrictedPieceType) return false;
+      if (duckSquare) {
+        const destSq = coordToSq(m.to[0], m.to[1]);
+        if (destSq === duckSquare) return false;
+      }
+      return true;
+    });
+  }, [state, interactive, allowedColor, awaitingDuckPlacement, restrictedPieceType, duckSquare]);
 
   const checkSq = useMemo(() => {
     if (!isInCheck(state.board, state.turn, state.variant)) return null;
@@ -231,7 +281,15 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   };
 
   const handleSquareClick = (r: number, c: number) => {
-    if (!interactive || moveMethod === 'drag') return;
+    if (!interactive) return;
+    if (awaitingDuckPlacement && onDuckPlace) {
+      const sq = coordToSq(r, c);
+      if (!state.board[r][c] && sq !== duckSquare) {
+        onDuckPlace(sq);
+      }
+      return;
+    }
+    if (moveMethod === 'drag') return;
     if (pendingConfirm) return;
 
     // Handle Premove Selection when waiting for opponent
@@ -288,7 +346,11 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
 
     // 3. Otherwise select piece on this square if it belongs to turn
     const piece = state.board[r][c];
-    if (piece && piece.color === state.turn) {
+    if (
+      piece &&
+      piece.color === state.turn &&
+      (!restrictedPieceType || piece.type === restrictedPieceType)
+    ) {
       setSelectedSq([r, c]);
       setSelectedDrop(null);
     } else {
@@ -297,7 +359,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
   };
 
   const handleDragStart = (r: number, c: number, e: React.DragEvent) => {
-    if (!interactive || moveMethod === 'click' || pendingConfirm) {
+    if (!interactive || awaitingDuckPlacement || moveMethod === 'click' || pendingConfirm) {
       e.preventDefault();
       return;
     }
@@ -316,7 +378,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
       e.preventDefault();
       return;
     }
-    if (!p || p.color !== state.turn) {
+    if (!p || p.color !== state.turn || (restrictedPieceType && p.type !== restrictedPieceType)) {
       e.preventDefault();
       return;
     }
@@ -516,6 +578,9 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
               const isKothCenter =
                 state.variant === 'kingOfTheHill' && ['d4', 'd5', 'e4', 'e5'].includes(sq);
               const annotatedSq = annotations?.squares.find((s) => s.square === sq);
+              const isFogHidden = fogVisibleSquares !== null && !fogVisibleSquares.has(sq);
+              const isDuckSq = duckSquare === sq;
+              const canDropDuckHere = awaitingDuckPlacement && !piece && !isDuckSq;
 
               return (
                 <div
@@ -531,7 +596,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                   className="relative flex items-center justify-center cursor-pointer"
                 >
                   {/* Last Move tint */}
-                  {isLast && (
+                  {isLast && !isFogHidden && (
                     <div
                       className="absolute inset-0 pointer-events-none"
                       style={{ backgroundColor: theme.lastMove }}
@@ -546,6 +611,11 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                   {/* Selected square tint */}
                   {isSelected && (
                     <div className="absolute inset-0 bg-emerald-500/40 pointer-events-none" />
+                  )}
+
+                  {/* Duck Placement Prompt */}
+                  {canDropDuckHere && (
+                    <div className="absolute inset-1.5 rounded-full border border-dashed border-amber-500/70 bg-amber-400/15 hover:bg-amber-400/35 transition-colors pointer-events-none" />
                   )}
 
                   {/* King of the Hill center target */}
@@ -567,7 +637,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                   )}
 
                   {/* Check radial glow */}
-                  {isInCheckSq && (
+                  {isInCheckSq && !isFogHidden && (
                     <div
                       className="absolute inset-0 pointer-events-none"
                       style={{
@@ -580,7 +650,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                   {/* Coordinates */}
                   {showCoordinates && vcIdx === 0 && (
                     <span
-                      className="absolute top-0.5 left-1 text-[10px] font-mono font-semibold leading-none pointer-events-none"
+                      className="absolute top-0.5 left-1 text-[10px] font-mono font-semibold leading-none pointer-events-none z-20"
                       style={{ color: isLight ? theme.coordLight : theme.coordDark }}
                     >
                       {RANKS[r]}
@@ -588,7 +658,7 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                   )}
                   {showCoordinates && vrIdx === 7 && (
                     <span
-                      className="absolute bottom-0.5 right-1 text-[10px] font-mono font-semibold leading-none pointer-events-none"
+                      className="absolute bottom-0.5 right-1 text-[10px] font-mono font-semibold leading-none pointer-events-none z-20"
                       style={{ color: isLight ? theme.coordLight : theme.coordDark }}
                     >
                       {FILES[c]}
@@ -596,12 +666,14 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                   )}
 
                   {/* Piece */}
-                  {piece && !blindfold && (
+                  {piece && !blindfold && !isFogHidden && (
                     <div
                       draggable={
                         interactive &&
+                        !awaitingDuckPlacement &&
                         moveMethod !== 'click' &&
                         !pendingConfirm &&
+                        (!restrictedPieceType || piece.type === restrictedPieceType) &&
                         (allowedColor === 'both' || allowedColor === state.turn || canPremoveNow)
                       }
                       onDragStart={(e) => handleDragStart(r, c, e)}
@@ -613,8 +685,34 @@ export const ChessBoard: React.FC<ChessBoardProps> = ({
                     </div>
                   )}
 
+                  {/* Duck Blocker Piece */}
+                  {isDuckSq && !isFogHidden && (
+                    <div
+                      className="relative z-10 w-[78%] h-[78%] flex items-center justify-center pointer-events-none drop-shadow-sm"
+                      title="Duck (blocks movement & captures)"
+                    >
+                      <svg viewBox="0 0 64 64" className="w-full h-full">
+                        <circle cx="34" cy="40" r="16" fill="#fbbf24" stroke="#92400e" strokeWidth="3" />
+                        <circle cx="24" cy="22" r="11" fill="#fcd34d" stroke="#92400e" strokeWidth="3" />
+                        <path d="M13 21 L5 24 L14 27 Z" fill="#f97316" stroke="#92400e" strokeWidth="2" />
+                        <circle cx="21" cy="20" r="2" fill="#1c1917" />
+                        <path d="M29 37 Q38 34 45 41 Q38 45 29 41 Z" fill="#f59e0b" />
+                      </svg>
+                    </div>
+                  )}
+
+                  {/* Fog of War Mist */}
+                  {isFogHidden && (
+                    <div
+                      className="absolute inset-0 z-15 bg-zinc-950/88 backdrop-blur-[2px] flex items-center justify-center pointer-events-none border border-zinc-900/40"
+                      title="Hidden in Fog of War"
+                    >
+                      <span className="w-1.5 h-1.5 rounded-full bg-zinc-700/60" />
+                    </div>
+                  )}
+
                   {/* Legal move indicator */}
-                  {isTarget && !piece && (
+                  {isTarget && !piece && !isDuckSq && (
                     <div className="relative z-20 w-3.5 h-3.5 rounded-full bg-zinc-900/25 pointer-events-none" />
                   )}
                   {isTarget && piece && (

@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
+import confetti from 'canvas-confetti';
 import {
   AuthUser,
   ChessVariant,
@@ -33,8 +34,28 @@ import { CommunityView } from './components/CommunityView';
 import { PreferencesModal } from './components/PreferencesModal';
 import { AuthModal } from './components/AuthModal';
 import { PlansModal } from './components/PlansModal';
+import { ProfileRewardsModal } from './components/ProfileRewardsModal';
+import { OfflineIndicator, PWAInstallButton } from './components/PWAInstallButton';
+import {
+  applyProgressionEvent,
+  getLevelFromXp,
+  loadProgressionState,
+  ProgressionState,
+  saveProgressionState,
+} from './data/progression';
 import { soundFX } from './utils/sound';
-import { Flame, Keyboard, SlidersHorizontal, User, X } from 'lucide-react';
+import {
+  Award,
+  Crown,
+  Flame,
+  Keyboard,
+  Shield,
+  SlidersHorizontal,
+  Sparkles,
+  Trophy,
+  User,
+  X,
+} from 'lucide-react';
 
 type MainTab = 'play' | 'analysis' | 'puzzles' | 'tournaments' | 'community';
 
@@ -76,6 +97,47 @@ const DEFAULT_RATINGS: UserRatings = {
 
 const STREAK_STORAGE_KEY = 'caissa_daily_streak_v1';
 
+type StreakMilestoneThreshold = 7 | 30 | 100;
+
+interface StreakMilestoneReward {
+  threshold: StreakMilestoneThreshold;
+  label: string;
+  badgeText: string;
+  className: string;
+}
+
+const STREAK_MILESTONES: readonly StreakMilestoneReward[] = [
+  {
+    threshold: 100,
+    label: '100-Day Legend',
+    badgeText: '100d Legend',
+    className:
+      'border-purple-400/80 dark:border-purple-600/70 bg-gradient-to-r from-purple-50 to-amber-50 dark:from-purple-950/60 dark:to-amber-950/50 text-purple-800 dark:text-purple-200',
+  },
+  {
+    threshold: 30,
+    label: '30-Day Master',
+    badgeText: '30d Master',
+    className:
+      'border-emerald-400/80 dark:border-emerald-600/70 bg-gradient-to-r from-emerald-50 to-teal-50 dark:from-emerald-950/60 dark:to-teal-950/50 text-emerald-800 dark:text-emerald-200',
+  },
+  {
+    threshold: 7,
+    label: '7-Day Club',
+    badgeText: '7d Star',
+    className:
+      'border-amber-400/80 dark:border-amber-600/70 bg-gradient-to-r from-amber-50 to-yellow-50 dark:from-amber-950/60 dark:to-yellow-950/50 text-amber-800 dark:text-amber-200',
+  },
+];
+
+function getStreakMilestoneReward(streak: number): StreakMilestoneReward | null {
+  return STREAK_MILESTONES.find((m) => streak >= m.threshold) || null;
+}
+
+function isExactStreakMilestone(streak: number): streak is StreakMilestoneThreshold {
+  return streak === 7 || streak === 30 || streak === 100;
+}
+
 interface DailyStreakRecord {
   count: number;
   lastDate: string;
@@ -106,7 +168,15 @@ function loadDailyStreakMap(): Record<string, DailyStreakRecord> {
   }
 }
 
-function recordUserLoginStreak(username: string): number {
+function recordUserLoginStreak(
+  username: string,
+  availableShields: number
+): {
+  count: number;
+  increased: boolean;
+  hitMilestone: StreakMilestoneThreshold | null;
+  shieldUsed: boolean;
+} {
   const key = username.trim().toLowerCase() || 'player';
   const now = new Date();
   const today = formatLocalCalendarDate(now);
@@ -115,12 +185,23 @@ function recordUserLoginStreak(username: string): number {
   const existing = map[key];
 
   let nextCount = 1;
+  let increased = false;
+  let shieldUsed = false;
+
   if (existing && typeof existing.count === 'number' && existing.count >= 1) {
     if (existing.lastDate === today) {
       nextCount = existing.count;
     } else if (existing.lastDate === yesterday) {
       nextCount = existing.count + 1;
+      increased = true;
+    } else if (availableShields > 0) {
+      // Streak Shield protects streak across missed calendar day(s)
+      nextCount = existing.count + 1;
+      increased = true;
+      shieldUsed = true;
     }
+  } else {
+    increased = true;
   }
 
   map[key] = { count: nextCount, lastDate: today };
@@ -129,7 +210,10 @@ function recordUserLoginStreak(username: string): number {
   } catch {
     // ignore storage quota errors
   }
-  return nextCount;
+
+  const hitMilestone =
+    increased && isExactStreakMilestone(nextCount) ? nextCount : null;
+  return { count: nextCount, increased, hitMilestone, shieldUsed };
 }
 
 function buildInitialGames(): GameRecord[] {
@@ -210,10 +294,44 @@ export default function App() {
   // Server-verified session held strictly in React state (never localStorage)
   const [authUser, setAuthUser] = useState<AuthUser | null>(null);
   const [authToken, setAuthToken] = useState<string | null>(null);
+  const [visitorId] = useState<string>(() => {
+    const VISITOR_KEY = 'caissa_visitor_id_v1';
+    try {
+      const existing = localStorage.getItem(VISITOR_KEY) || '';
+      if (/^[a-zA-Z0-9_-]{8,64}$/.test(existing)) {
+        return existing;
+      }
+      const rand =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID().replace(/-/g, '')
+          : `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 12)}`;
+      const created = `v_${rand}`.slice(0, 48);
+      localStorage.setItem(VISITOR_KEY, created);
+      return created;
+    } catch {
+      return `v_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    }
+  });
   const [dailyStreak, setDailyStreak] = useState<number>(0);
+  const [streakPulseActive, setStreakPulseActive] = useState<boolean>(false);
+  const [celebratedMilestone, setCelebratedMilestone] = useState<StreakMilestoneThreshold | null>(
+    null
+  );
+  const streakBadgeRef = useRef<HTMLDivElement | null>(null);
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<'login' | 'register'>('login');
   const [plansModalOpen, setPlansModalOpen] = useState(false);
+  const [rewardsModalOpen, setRewardsModalOpen] = useState(false);
+  const [progression, setProgression] = useState<ProgressionState>(() => loadProgressionState());
+  const [initialChallengeRoomId, setInitialChallengeRoomId] = useState<string | null>(() => {
+    try {
+      const q = new URLSearchParams(window.location.search).get('challenge');
+      return q && /^[a-zA-Z0-9_-]{4,40}$/.test(q) ? q : null;
+    } catch {
+      return null;
+    }
+  });
+  const [spectateRoomId, setSpectateRoomId] = useState<string | null>(null);
 
   const loadGuestPlanState = (): { plan: PlanTier; usage: DailyQuotaUsage } => {
     try {
@@ -280,10 +398,60 @@ export default function App() {
     setAuthModalOpen(true);
   };
 
+  useEffect(() => {
+    if (!streakPulseActive) return;
+    const timer = window.setTimeout(() => setStreakPulseActive(false), 2400);
+    return () => window.clearTimeout(timer);
+  }, [streakPulseActive]);
+
+  useEffect(() => {
+    if (!celebratedMilestone) return;
+    const rafId = window.requestAnimationFrame(() => {
+      const rect = streakBadgeRef.current?.getBoundingClientRect();
+      const origin =
+        rect && window.innerWidth > 0 && window.innerHeight > 0
+          ? {
+              x: Math.min(0.95, Math.max(0.05, (rect.left + rect.width / 2) / window.innerWidth)),
+              y: Math.min(0.95, Math.max(0.05, (rect.top + rect.height / 2) / window.innerHeight)),
+            }
+          : { x: 0.8, y: 0.08 };
+
+      confetti({
+        particleCount: 55,
+        spread: 65,
+        startVelocity: 26,
+        scalar: 0.85,
+        ticks: 140,
+        origin,
+        disableForReducedMotion: true,
+        colors: ['#f59e0b', '#10b981', '#fbbf24', '#a855f7', '#38bdf8'],
+      });
+    });
+    const timer = window.setTimeout(() => setCelebratedMilestone(null), 4000);
+    return () => {
+      window.cancelAnimationFrame(rafId);
+      window.clearTimeout(timer);
+    };
+  }, [celebratedMilestone]);
+
   const handleAuthSuccess = (token: string, user: AuthUser) => {
     setAuthToken(token);
     setAuthUser(user);
-    setDailyStreak(recordUserLoginStreak(user.username));
+    const streakRes = recordUserLoginStreak(user.username, progression.streakShields);
+    setDailyStreak(streakRes.count);
+    if (streakRes.shieldUsed) {
+      setProgression((prev) => {
+        const next = { ...prev, streakShields: Math.max(0, prev.streakShields - 1) };
+        saveProgressionState(next);
+        return next;
+      });
+    }
+    if (streakRes.increased) {
+      setStreakPulseActive(true);
+    }
+    if (streakRes.hitMilestone) {
+      setCelebratedMilestone(streakRes.hitMilestone);
+    }
     setPrefs((prev) => ({ ...prev, username: user.username }));
     if (user.plan) setPlanTier(user.plan);
     if (user.quota) setDailyUsage(normalizeQuotaUsage(user.quota));
@@ -306,6 +474,8 @@ export default function App() {
     setAuthToken(null);
     setAuthUser(null);
     setDailyStreak(0);
+    setStreakPulseActive(false);
+    setCelebratedMilestone(null);
     setPrefs((prev) => ({ ...prev, username: DEFAULT_PREFS.username }));
     const guest = loadGuestPlanState();
     setPlanTier(guest.plan);
@@ -604,6 +774,72 @@ export default function App() {
   }, [prefs]);
 
   useEffect(() => {
+    if (!authToken) return;
+    fetch('/api/account/bot', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${authToken}`,
+      },
+      body: JSON.stringify({ isBot: Boolean(prefs.isBot) }),
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data: { user?: AuthUser } | null) => {
+        if (data?.user) {
+          setAuthUser(data.user);
+        }
+      })
+      .catch(() => {
+        // Ignore offline errors
+      });
+  }, [authToken, prefs.isBot]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (authToken) {
+        headers.Authorization = `Bearer ${authToken}`;
+      }
+      fetch('/api/leaderboard/checkin', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({
+          visitorId,
+          username: authUser ? authUser.username : 'Anonymous',
+          ratings: {
+            bullet: userRatings.bullet,
+            blitz: userRatings.blitz,
+            rapid: userRatings.rapid,
+            classical: userRatings.classical,
+            chess960: userRatings.chess960,
+          },
+          isBot: Boolean(prefs.isBot || authUser?.isBot),
+        }),
+      })
+        .then((r) => {
+          if (r.ok) {
+            window.dispatchEvent(new Event('caissa:leaderboard-updated'));
+          }
+        })
+        .catch(() => {
+          // Ignore offline / static mode errors
+        });
+    }, 300);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    visitorId,
+    authToken,
+    authUser,
+    prefs.isBot,
+    userRatings.bullet,
+    userRatings.blitz,
+    userRatings.rapid,
+    userRatings.classical,
+    userRatings.chess960,
+  ]);
+
+  useEffect(() => {
     try {
       localStorage.setItem('caissa_ratings_v1', JSON.stringify(userRatings));
     } catch {
@@ -710,26 +946,56 @@ export default function App() {
 
           {/* Zone 3: Account + Preferences */}
           <div className="shrink-0 flex items-center gap-2">
-            {authUser ? (
-              <>
-                <button
-                  type="button"
-                  onClick={() => openAuthModal('login')}
-                  className="px-3 py-1.5 rounded-lg border border-emerald-600/40 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
-                >
-                  <User className="w-3.5 h-3.5" />
-                  <span>{authUser.username}</span>
-                </button>
-                <div
-                  className="px-2.5 py-1.5 rounded-lg border border-amber-300/80 dark:border-amber-700/70 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 text-xs font-semibold whitespace-nowrap shrink-0 flex items-center gap-1.5 tabular-nums"
-                  title={`Daily Streak: ${dailyStreak} consecutive ${dailyStreak === 1 ? 'day' : 'days'} logged in`}
-                  aria-label={`Daily Streak: ${dailyStreak} days`}
-                >
-                  <Flame className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                  <span>Daily Streak: {dailyStreak}</span>
-                </div>
-              </>
-            ) : (
+            {authUser ? (() => {
+              const activeMilestone = getStreakMilestoneReward(dailyStreak);
+              return (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => openAuthModal('login')}
+                    className="px-3 py-1.5 rounded-lg border border-emerald-600/40 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <User className="w-3.5 h-3.5" />
+                    <span>{authUser.username}</span>
+                  </button>
+                  <div ref={streakBadgeRef} className="flex items-center gap-1.5 shrink-0">
+                    <div
+                      className={`px-2.5 py-1.5 rounded-lg border border-amber-300/80 dark:border-amber-700/70 bg-amber-50 dark:bg-amber-950/40 text-amber-800 dark:text-amber-300 text-xs font-semibold whitespace-nowrap shrink-0 flex items-center gap-1.5 tabular-nums transition-transform ${
+                        streakPulseActive ? 'streak-badge-animate' : ''
+                      }`}
+                      title={`Daily Streak: ${dailyStreak} consecutive ${dailyStreak === 1 ? 'day' : 'days'} logged in`}
+                      aria-label={`Daily Streak: ${dailyStreak} days`}
+                    >
+                      <Flame className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                      <span>Daily Streak: {dailyStreak}</span>
+                      {streakPulseActive && (
+                        <Sparkles className="w-3 h-3 text-amber-500 animate-pulse shrink-0" />
+                      )}
+                    </div>
+                    {activeMilestone && (
+                      <div
+                        className={`px-2.5 py-1.5 rounded-lg border text-xs font-semibold whitespace-nowrap shrink-0 flex items-center gap-1.5 shadow-xs ${activeMilestone.className} ${
+                          celebratedMilestone === activeMilestone.threshold
+                            ? 'milestone-badge-animate'
+                            : ''
+                        }`}
+                        title={`Milestone Reward Unlocked: ${activeMilestone.label} (${activeMilestone.threshold}+ consecutive login days)`}
+                        aria-label={`Milestone Reward: ${activeMilestone.label}`}
+                      >
+                        {activeMilestone.threshold === 100 ? (
+                          <Trophy className="w-3.5 h-3.5 text-purple-600 dark:text-purple-300 shrink-0" />
+                        ) : activeMilestone.threshold === 30 ? (
+                          <Crown className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-300 shrink-0" />
+                        ) : (
+                          <Award className="w-3.5 h-3.5 text-amber-600 dark:text-amber-300 shrink-0" />
+                        )}
+                        <span>{activeMilestone.badgeText}</span>
+                      </div>
+                    )}
+                  </div>
+                </>
+              );
+            })() : (
               <>
                 <button
                   type="button"
@@ -747,6 +1013,22 @@ export default function App() {
                 </button>
               </>
             )}
+            <button
+              type="button"
+              onClick={() => setRewardsModalOpen(true)}
+              className="px-2.5 py-1.5 rounded-lg border border-stone-200 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-stone-700 dark:text-zinc-200 hover:bg-stone-100 dark:hover:bg-zinc-800 text-xs font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer"
+              title="Quests, XP Level, Streak Shields & Trophies"
+            >
+              <Trophy className="w-3.5 h-3.5 text-amber-500" />
+              <span className="font-mono">Lv.{getLevelFromXp(progression.xp).level}</span>
+              {progression.streakShields > 0 && (
+                <span className="flex items-center gap-0.5 text-amber-600 dark:text-amber-400 font-mono">
+                  <Shield className="w-3 h-3" />
+                  {progression.streakShields}
+                </span>
+              )}
+            </button>
+            <PWAInstallButton />
             <button
               type="button"
               onClick={() => setPrefsOpen(true)}
@@ -768,9 +1050,33 @@ export default function App() {
             prefs={prefs}
             games={games}
             userRatings={userRatings}
+            authUser={authUser}
+            authToken={authToken}
             initialVariant={playPayload.variant}
             initialFen={playPayload.fen}
-            onGameCompleted={(rec) => setGames((prev) => [rec, ...prev])}
+            initialChallengeRoomId={initialChallengeRoomId}
+            initialSpectateRoomId={spectateRoomId}
+            defeatedBossIds={progression.defeatedBossIds}
+            onClearChallenge={() => {
+              setInitialChallengeRoomId(null);
+              setSpectateRoomId(null);
+            }}
+            onGameCompleted={(rec, meta) => {
+              setGames((prev) => [rec, ...prev]);
+              const userCol = rec.userColor || 'w';
+              const won =
+                (userCol === 'w' && rec.result === '1-0') ||
+                (userCol === 'b' && rec.result === '0-1');
+              setProgression((prev) =>
+                applyProgressionEvent(prev, {
+                  type: 'game_completed',
+                  won,
+                  variant: rec.variant,
+                  isWild: meta?.isWild,
+                  bossId: meta?.bossId,
+                })
+              );
+            }}
             onApplyRatingDelta={handleApplyRatingDelta}
             onSendToAnalysis={handleOpenAnalysis}
           />
@@ -816,6 +1122,11 @@ export default function App() {
                 }
                 onPlayFromPosition={handlePlayFromPosition}
                 onImportGameRecord={(rec) => setGames((prev) => [rec, ...prev])}
+                onAnalysisCompleted={() =>
+                  setProgression((prev) =>
+                    applyProgressionEvent(prev, { type: 'analysis_completed' })
+                  )
+                }
                 planTier={planTier}
                 dailyUsage={dailyUsage}
                 onConsumeAnalysisQuota={() => handleConsumeQuota('analysis')}
@@ -836,11 +1147,19 @@ export default function App() {
         {activeTab === 'puzzles' && (
           <PuzzlesView
             prefs={prefs}
+            authUser={authUser}
+            authToken={authToken}
             userGamePuzzles={userGamePuzzles}
             planTier={planTier}
             dailyUsage={dailyUsage}
             onConsumePuzzleQuota={() => handleConsumeQuota('puzzle')}
+            onPuzzleSolved={() =>
+              setProgression((prev) =>
+                applyProgressionEvent(prev, { type: 'puzzle_solved' })
+              )
+            }
             onOpenPlans={() => setPlansModalOpen(true)}
+            onOpenAuth={openAuthModal}
             onOpenInAnalysis={(fen) => handleOpenAnalysis({ fen, variant: 'standard' })}
           />
         )}
@@ -857,9 +1176,16 @@ export default function App() {
         {activeTab === 'community' && (
           <CommunityView
             prefs={prefs}
+            authUser={authUser}
+            authToken={authToken}
+            visitorId={visitorId}
             games={games}
             userRatings={userRatings}
             onChallengeStart={handleChallengeVariant}
+            onSpectateLiveRoom={(roomId) => {
+              setSpectateRoomId(roomId);
+              setActiveTab('play');
+            }}
             onSendToAnalysis={(payload) => handleOpenAnalysis(payload)}
           />
         )}
@@ -925,7 +1251,24 @@ export default function App() {
         onLogout={handleLogout}
         planTier={planTier}
         onOpenPlans={() => setPlansModalOpen(true)}
+        visitorId={visitorId}
+        guestStatsSummary={{
+          gamesCount: games.length,
+          puzzlesSolved: progression.puzzlesSolved,
+          blitzRating: userRatings.blitz,
+        }}
       />
+
+      <ProfileRewardsModal
+        open={rewardsModalOpen}
+        onClose={() => setRewardsModalOpen(false)}
+        progression={progression}
+        onUpdateProgression={setProgression}
+        dailyStreak={dailyStreak}
+        username={authUser ? authUser.username : 'Anonymous (Guest)'}
+      />
+
+      <OfflineIndicator />
 
       <PlansModal
         open={plansModalOpen}

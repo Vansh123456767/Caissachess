@@ -48,6 +48,7 @@ import { MaterialStrip } from './MaterialStrip';
 import { computeMaterialSummary } from '../utils/material';
 import { announceMove, soundFX } from '../utils/sound';
 import {
+  AlertTriangle,
   ArrowLeftRight,
   ArrowUp,
   BookOpen,
@@ -62,6 +63,7 @@ import {
   Eraser,
   GitBranch,
   GraduationCap,
+  Lightbulb,
   Pause,
   Play,
   RotateCcw,
@@ -69,6 +71,7 @@ import {
   Share2,
   ShieldAlert,
   Sliders,
+  Sparkles,
   Swords,
   Trash2,
   Upload,
@@ -87,6 +90,7 @@ interface AnalysisViewProps {
   onSaveExtractedPuzzles: (puzzles: Puzzle[]) => void;
   onPlayFromPosition: (fen: string, variant: ChessVariant) => void;
   onImportGameRecord: (record: GameRecord) => void;
+  onAnalysisCompleted?: () => void;
   planTier: PlanTier;
   dailyUsage: DailyQuotaUsage;
   onConsumeAnalysisQuota: () => Promise<{ allowed: boolean; error?: string }>;
@@ -95,6 +99,29 @@ interface AnalysisViewProps {
 
 type AnalysisSubTab = 'board' | 'editor' | 'explorer' | 'tablebase';
 
+function buildCoachExplanation(m: AnalyzedMove): string {
+  const best = m.bestMoveSan;
+  if (best.includes('#')) {
+    return `Missed forced checkmate (${best})! Look closely for checks against an exposed king.`;
+  }
+  if (m.cpLoss >= 250 && best.includes('x')) {
+    return `Hanging piece / tactical loss: ${best} won material cleanly instead of ${m.san}. Always run a quick undefended-piece check.`;
+  }
+  if (best.includes('+') && (best.includes('Q') || best.includes('R'))) {
+    return `Missed forcing check/back-rank motif: ${best} seized the initiative with tempo.`;
+  }
+  if (best === 'O-O' || best === 'O-O-O') {
+    return `King safety delay: castling (${best}) sheltered your king and connected the rooks faster than ${m.san}.`;
+  }
+  if (m.classification === 'Blunder') {
+    return `Critical tactical swing (-${m.cpLoss} cp): ${best} kept your position solid; ${m.san} opened dangerous counterplay.`;
+  }
+  if (m.classification === 'Mistake') {
+    return `Missed tactical improvement (-${m.cpLoss} cp): ${best} activated your pieces more harmoniously than ${m.san}.`;
+  }
+  return `Slight positional inaccuracy (-${m.cpLoss} cp): ${best} kept stronger central/pawn structure control.`;
+}
+
 export const AnalysisView: React.FC<AnalysisViewProps> = ({
   prefs,
   games,
@@ -102,6 +129,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
   onSaveExtractedPuzzles,
   onPlayFromPosition,
   onImportGameRecord,
+  onAnalysisCompleted,
   planTier,
   dailyUsage,
   onConsumeAnalysisQuota,
@@ -181,6 +209,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
   const [showArchiveDrawer, setShowArchiveDrawer] = useState(false);
   const [archiveSearch, setArchiveSearch] = useState('');
   const [shareCopied, setShareCopied] = useState(false);
+  const [storyCopied, setStoryCopied] = useState(false);
   const [pgnInput, setPgnInput] = useState('');
   const [copiedFen, setCopiedFen] = useState(false);
 
@@ -596,6 +625,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
         const res = analyzeGameMoves(fens, moves, variant);
         setReviewData({ analyzed: res.analyzed, accuracy: res.accuracy, acpl: res.acpl });
         setReviewProgress(null);
+        onAnalysisCompleted?.();
         if (res.extractedPuzzles.length > 0) {
           onSaveExtractedPuzzles(res.extractedPuzzles);
         }
@@ -626,6 +656,7 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
             acpl: msg.acpl,
           });
           setReviewProgress(null);
+          onAnalysisCompleted?.();
           if (msg.extractedPuzzles.length > 0) {
             onSaveExtractedPuzzles(msg.extractedPuzzles);
           }
@@ -773,6 +804,69 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
       computeMaterialSummary(parseFen(m.fenAfter, variant)).advantage
     );
   }, [reviewData, chartMode, variant]);
+
+  const gameStory = useMemo(() => {
+    if (!reviewData || reviewData.analyzed.length === 0) return null;
+    const brilliantOrBest = reviewData.analyzed.filter(
+      (m) => m.classification === 'Best' || m.classification === 'Great'
+    ).length;
+    const blunderOrMistake = reviewData.analyzed.filter(
+      (m) => m.classification === 'Blunder' || m.classification === 'Mistake'
+    ).length;
+    const worstMove = [...reviewData.analyzed].sort((a, b) => b.cpLoss - a.cpLoss)[0];
+    const headlineOpening = detectOpeningFromMoves(moves.slice(0, 12).map((m) => m.san || ''));
+    return {
+      brilliantOrBest,
+      blunderOrMistake,
+      worstMove,
+      headlineOpening,
+    };
+  }, [reviewData, moves]);
+
+  const repertoireLeaks = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        label: string;
+        games: number;
+        wins: number;
+        draws: number;
+        losses: number;
+        sampleMoves: string[];
+      }
+    >();
+    for (const g of games) {
+      const label = g.openingName
+        ? `${g.openingEco ? `${g.openingEco} ` : ''}${g.openingName}`
+        : 'Unclassified Line';
+      const entry = map.get(label) || {
+        label,
+        games: 0,
+        wins: 0,
+        draws: 0,
+        losses: 0,
+        sampleMoves: g.moves.slice(0, 8).map((m) => m.san || '').filter(Boolean),
+      };
+      entry.games += 1;
+      const userColor = g.userColor || 'w';
+      if (g.result === '1/2-1/2') entry.draws += 1;
+      else if (
+        (userColor === 'w' && g.result === '1-0') ||
+        (userColor === 'b' && g.result === '0-1')
+      ) {
+        entry.wins += 1;
+      } else {
+        entry.losses += 1;
+      }
+      map.set(label, entry);
+    }
+    return Array.from(map.values())
+      .map((item) => ({
+        ...item,
+        winPct: Math.round(((item.wins + item.draws * 0.5) / item.games) * 100),
+      }))
+      .sort((a, b) => a.winPct - b.winPct || b.games - a.games);
+  }, [games]);
 
   const filteredArchiveGames = useMemo(() => {
     const q = archiveSearch.trim().toLowerCase();
@@ -1821,6 +1915,85 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
                           />
                         </svg>
                       </div>
+
+                      {/* Interactive Game Story Card */}
+                      {gameStory && (
+                        <div className="p-3.5 rounded-xl bg-gradient-to-br from-emerald-50/80 to-stone-50 dark:from-emerald-950/30 dark:to-zinc-950 border border-emerald-200 dark:border-emerald-900/60 space-y-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="text-xs font-bold text-stone-900 dark:text-zinc-100 flex items-center gap-1.5">
+                              <Sparkles className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" />
+                              Interactive Game Story · {gameStory.headlineOpening.eco} {gameStory.headlineOpening.name}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const txt = `Caissa Chess Review (${gameStory.headlineOpening.eco} ${gameStory.headlineOpening.name}): White ${reviewData.accuracy.w}% (${reviewData.acpl.w} ACPL) vs Black ${reviewData.accuracy.b}% (${reviewData.acpl.b} ACPL). ${gameStory.brilliantOrBest} Best/Great moves; key turning point at move ${Math.ceil(gameStory.worstMove.ply / 2)} (${gameStory.worstMove.san}).`;
+                                navigator.clipboard.writeText(txt).catch(() => {});
+                                setStoryCopied(true);
+                                window.setTimeout(() => setStoryCopied(false), 1800);
+                              }}
+                              className="px-2.5 py-1 rounded border border-emerald-300 dark:border-emerald-800 bg-white dark:bg-zinc-900 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-1"
+                            >
+                              {storyCopied ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                              {storyCopied ? 'Story Copied' : 'Share Game Story'}
+                            </button>
+                          </div>
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-stone-600 dark:text-zinc-300">
+                            <span>
+                              Best/Great moves: <strong>{gameStory.brilliantOrBest}</strong> · Mistakes/Blunders:{' '}
+                              <strong>{gameStory.blunderOrMistake}</strong>
+                            </span>
+                            {gameStory.worstMove && gameStory.worstMove.cpLoss > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setActiveVariation(null);
+                                  setPly(gameStory.worstMove.ply);
+                                }}
+                                className="font-semibold text-amber-700 dark:text-amber-300 hover:underline"
+                              >
+                                Turning Point: Move {Math.ceil(gameStory.worstMove.ply / 2)} ({gameStory.worstMove.san} →{' '}
+                                {gameStory.worstMove.bestMoveSan})
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Plain-English Coach Mistake Explanations */}
+                      {mistakesList.length > 0 && (
+                        <div className="p-3 rounded-xl bg-stone-50 dark:bg-zinc-950 border border-stone-200 dark:border-zinc-800 space-y-2">
+                          <div className="text-xs font-semibold text-stone-800 dark:text-zinc-200 flex items-center gap-1.5">
+                            <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
+                            Plain-English Coach Explanations ({mistakesList.length})
+                          </div>
+                          <div className="max-h-40 overflow-y-auto thin-scroll space-y-1.5">
+                            {mistakesList.map((m) => (
+                              <button
+                                key={m.ply}
+                                type="button"
+                                onClick={() => {
+                                  setActiveVariation(null);
+                                  setPly(m.ply - 1);
+                                }}
+                                className="w-full text-left p-2 rounded-lg border border-stone-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:border-emerald-500 text-[11px] space-y-0.5"
+                              >
+                                <div className="flex items-center justify-between font-mono">
+                                  <span className="font-bold text-stone-900 dark:text-zinc-100">
+                                    Move {Math.ceil(m.ply / 2)}: {m.san} → {m.bestMoveSan}
+                                  </span>
+                                  <span className="text-amber-600 dark:text-amber-400">
+                                    {m.classification} (-{m.cpLoss} cp)
+                                  </span>
+                                </div>
+                                <div className="text-stone-600 dark:text-zinc-400">
+                                  {buildCoachExplanation(m)}
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                   )}
 
@@ -2185,6 +2358,57 @@ export const AnalysisView: React.FC<AnalysisViewProps> = ({
                       </button>
                     ))}
                   </div>
+                </div>
+
+                {/* Repertoire Leak Detector */}
+                <div className="pt-3 border-t border-stone-100 dark:border-zinc-800 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-stone-700 dark:text-zinc-300 flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+                      Repertoire Leak Detector ({repertoireLeaks.length} lines)
+                    </span>
+                    <span className="text-[11px] text-stone-400">From saved games</span>
+                  </div>
+                  {repertoireLeaks.length === 0 ? (
+                    <p className="text-xs text-stone-500 dark:text-zinc-400">
+                      Play or import games to detect openings with low win rates.
+                    </p>
+                  ) : (
+                    <div className="max-h-40 overflow-y-auto thin-scroll space-y-1.5">
+                      {repertoireLeaks.map((leak) => {
+                        const isLeak = leak.winPct <= 40;
+                        return (
+                          <div
+                            key={leak.label}
+                            className="p-2 rounded-lg border border-stone-200 dark:border-zinc-800 bg-stone-50 dark:bg-zinc-950 flex items-center justify-between gap-2 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <div className="font-medium text-stone-900 dark:text-zinc-100 truncate">
+                                {leak.label}
+                              </div>
+                              <div className="text-[11px] font-mono text-stone-500">
+                                {leak.wins}W-{leak.draws}D-{leak.losses}L · {leak.winPct}% score
+                                {isLeak && (
+                                  <span className="ml-1.5 text-amber-600 dark:text-amber-400 font-semibold">
+                                    · Leak Flagged
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            {leak.sampleMoves.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => loadOpeningLine(leak.sampleMoves)}
+                                className="px-2 py-1 rounded border border-stone-200 dark:border-zinc-700 text-[11px] font-semibold hover:bg-stone-100 dark:hover:bg-zinc-800 shrink-0"
+                              >
+                                Study Line
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
             )}

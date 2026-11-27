@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AuthUser,
   DailyQuotaUsage,
   GameResult,
   Move,
@@ -44,6 +45,7 @@ import { findBestMove, probeTablebase } from '../engine/aiSearch';
 import { ChessBoard } from './ChessBoard';
 import { CoordinatesTrainer } from './CoordinatesTrainer';
 import { PracticeTrainer } from './PracticeTrainer';
+import { PuzzleTrainingModes, ExtendedTrainingMode } from './PuzzleTrainingModes';
 import {
   DailyLeaderboard,
   DailyLeaderboardEntry,
@@ -78,17 +80,26 @@ import {
 
 interface PuzzlesViewProps {
   prefs: UserPreferences;
+  authUser?: AuthUser | null;
+  authToken?: string | null;
   userGamePuzzles: Puzzle[];
   planTier: PlanTier;
   dailyUsage: DailyQuotaUsage;
   onConsumePuzzleQuota: () => Promise<{ allowed: boolean; error?: string }>;
+  onPuzzleSolved?: () => void;
   onOpenPlans: () => void;
+  onOpenAuth?: (mode: 'login' | 'register') => void;
   onOpenInAnalysis?: (fen: string) => void;
 }
 
 type PuzzleSubTab =
   | 'daily'
   | 'tactics'
+  | 'duel'
+  | 'blunder-drill'
+  | 'visualize'
+  | 'scramble'
+  | 'maker'
   | 'blitz'
   | 'streak'
   | 'storm'
@@ -188,14 +199,20 @@ function DifficultyBadge({ rating }: { rating: number }) {
 
 export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
   prefs,
+  authUser = null,
+  authToken = null,
   userGamePuzzles,
   planTier,
   dailyUsage,
   onConsumePuzzleQuota,
+  onPuzzleSolved,
   onOpenPlans,
+  onOpenAuth,
   onOpenInAnalysis,
 }) => {
+  const effectiveUsername = authUser ? authUser.username : 'Anonymous';
   const [subTab, setSubTab] = useState<PuzzleSubTab>('daily');
+  const [customPuzzles, setCustomPuzzles] = useState<Puzzle[]>([]);
   const [sourceFilter, setSourceFilter] = useState<'all' | 'user'>('all');
   const [puzzleQuotaError, setPuzzleQuotaError] = useState<string | null>(null);
   const puzzleRoundCountedRef = useRef<boolean>(false);
@@ -246,27 +263,30 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
     return count;
   }, [solvedDailyDates]);
 
-  const isUserBot = isBotAccount({ name: prefs.username, isBot: prefs.isBot });
+  const isUserBot = isBotAccount({
+    name: authUser ? authUser.username : '',
+    isBot: Boolean(prefs.isBot || authUser?.isBot),
+  });
 
   // Daily Leaderboard state (persisted in localStorage; bots excluded)
   const [leaderboard, setLeaderboard] = useState<DailyLeaderboardEntry[]>(() =>
-    loadLeaderboard(todayKey, prefs.username, isUserBot)
+    loadLeaderboard(todayKey, effectiveUsername, isUserBot)
   );
 
   useEffect(() => {
     setLeaderboard((prev) => {
       if (isUserBot) {
         return prev.filter(
-          (e) => !isBotAccount(e) && e.name.toLowerCase() !== prefs.username.toLowerCase()
+          (e) => !isBotAccount(e) && e.name.toLowerCase() !== effectiveUsername.toLowerCase()
         );
       }
       const hasUser = prev.some(
-        (e) => e.name.toLowerCase() === prefs.username.toLowerCase()
+        (e) => e.name.toLowerCase() === effectiveUsername.toLowerCase()
       );
       if (hasUser) return prev.filter((e) => !isBotAccount(e));
-      return loadLeaderboard(todayKey, prefs.username, false);
+      return loadLeaderboard(todayKey, effectiveUsername, false);
     });
-  }, [prefs.username, isUserBot, todayKey]);
+  }, [effectiveUsername, isUserBot, todayKey]);
 
   useEffect(() => {
     saveLeaderboard(leaderboard);
@@ -276,11 +296,11 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
     if (isUserBot) return;
     setLeaderboard((prev) => {
       const exists = prev.some(
-        (e) => e.name.toLowerCase() === prefs.username.toLowerCase()
+        (e) => e.name.toLowerCase() === effectiveUsername.toLowerCase()
       );
-      const base = exists ? prev : loadLeaderboard(todayKey, prefs.username, false);
+      const base = exists ? prev : loadLeaderboard(todayKey, effectiveUsername, false);
       return base.map((entry) => {
-        if (entry.name.toLowerCase() !== prefs.username.toLowerCase()) return entry;
+        if (entry.name.toLowerCase() !== effectiveUsername.toLowerCase()) return entry;
         const resetDay = entry.lastUpdatedDate !== todayKey;
         const nextSolvedToday = (resetDay ? 0 : entry.solvedToday) + 1;
         const nextStreak = entry.currentStreak + 1;
@@ -300,7 +320,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
     if (isUserBot) return;
     setLeaderboard((prev) =>
       prev.map((entry) =>
-        entry.name.toLowerCase() === prefs.username.toLowerCase()
+        entry.name.toLowerCase() === effectiveUsername.toLowerCase()
           ? { ...entry, currentStreak: 0, lastUpdatedDate: todayKey }
           : entry
       )
@@ -310,7 +330,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
   const resetUserLeaderboardStats = () => {
     setLeaderboard((prev) =>
       prev.map((entry) =>
-        entry.name.toLowerCase() === prefs.username.toLowerCase()
+        entry.name.toLowerCase() === effectiveUsername.toLowerCase()
           ? {
               ...entry,
               solvedToday: 0,
@@ -355,13 +375,30 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
     }
   }, [puzzleAttemptHistory]);
 
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/puzzles/custom')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled && Array.isArray(data?.puzzles)) {
+          setCustomPuzzles(data.puzzles);
+        }
+      })
+      .catch(() => {
+        // Offline / fallback
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const availableThemes = useMemo(() => {
     const set = new Set<string>();
-    [...CURATED_PUZZLES, ...userGamePuzzles].forEach((p) =>
+    [...CURATED_PUZZLES, ...userGamePuzzles, ...customPuzzles].forEach((p) =>
       p.themes.forEach((th) => set.add(th))
     );
     return Array.from(set).sort();
-  }, [userGamePuzzles]);
+  }, [userGamePuzzles, customPuzzles]);
 
   useEffect(() => {
     let cancelled = false;
@@ -414,13 +451,17 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
       difficultyFilter === 'all'
         ? userGamePuzzles
         : userGamePuzzles.filter((p) => getPuzzleDifficulty(p.rating) === difficultyFilter);
+    const filteredCustom =
+      difficultyFilter === 'all'
+        ? customPuzzles
+        : customPuzzles.filter((p) => getPuzzleDifficulty(p.rating) === difficultyFilter);
 
     let base =
       sourceFilter === 'user' && filteredUser.length > 0
         ? [...filteredUser]
         : sourceFilter === 'user'
         ? [...fetchedCuratedPuzzles]
-        : [...filteredUser, ...fetchedCuratedPuzzles];
+        : [...filteredUser, ...filteredCustom, ...fetchedCuratedPuzzles];
 
     if (themeFilter !== 'all') {
       const themed = base.filter((p) => p.themes.includes(themeFilter));
@@ -434,7 +475,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
       return [...base].sort((a, b) => b.rating - a.rating);
     }
     return base;
-  }, [sourceFilter, userGamePuzzles, fetchedCuratedPuzzles, difficultyFilter, themeFilter, sortOrder]);
+  }, [sourceFilter, userGamePuzzles, customPuzzles, fetchedCuratedPuzzles, difficultyFilter, themeFilter, sortOrder]);
 
   // Shared Puzzle Runner State
   const [puzzleIdx, setPuzzleIdx] = useState(0);
@@ -758,6 +799,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
       setStepIdx(nextStep);
       setFeedback('solved');
       recordLeaderboardSolve();
+      onPuzzleSolved?.();
       setPuzzleAttemptHistory((prev) => [
         {
           id: activePuzzle.id,
@@ -1113,6 +1155,11 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
           {([
             ['daily', 'Daily Puzzle'],
             ['tactics', 'Tactics'],
+            ['duel', 'Live 1v1 Duel'],
+            ['blunder-drill', 'Blunder Trainer'],
+            ['visualize', 'Visualization'],
+            ['scramble', 'Time-Scramble'],
+            ['maker', 'Puzzle Maker'],
             ['blitz', 'Puzzle Blitz'],
             ['streak', 'Puzzle Streak'],
             ['storm', 'Puzzle Storm'],
@@ -1175,6 +1222,17 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
               {planLimits.puzzlesPerDay === null ? '∞' : planLimits.puzzlesPerDay}
             </span>
           </button>
+
+          {!authUser && (
+            <button
+              type="button"
+              onClick={() => onOpenAuth?.('register')}
+              className="px-2.5 py-1.5 rounded-lg border border-stone-200 dark:border-zinc-700 bg-stone-50 dark:bg-zinc-900 text-stone-600 dark:text-zinc-300 hover:text-stone-900 dark:hover:text-zinc-100 text-xs font-medium whitespace-nowrap shrink-0 cursor-pointer"
+              title="Playing puzzles without an account — listed as Anonymous on the leaderboard"
+            >
+              Playing as Anonymous
+            </button>
+          )}
 
           <span className="font-mono tabular-nums text-stone-500 dark:text-zinc-400">
             Rating: <strong className="text-stone-900 dark:text-zinc-100">{puzzleRating}</strong>
@@ -1313,6 +1371,21 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
             </div>
           );
         })()
+      ) : subTab === 'duel' ||
+        subTab === 'blunder-drill' ||
+        subTab === 'visualize' ||
+        subTab === 'scramble' ||
+        subTab === 'maker' ? (
+        <PuzzleTrainingModes
+          mode={subTab as ExtendedTrainingMode}
+          prefs={prefs}
+          authUser={authUser}
+          authToken={authToken}
+          userGamePuzzles={userGamePuzzles}
+          customPuzzles={customPuzzles}
+          onPuzzleSolved={onPuzzleSolved}
+          onCustomPuzzleCreated={(p) => setCustomPuzzles((prev) => [p, ...prev])}
+        />
       ) : subTab === 'practice' ? (
         <PracticeTrainer prefs={prefs} />
       ) : subTab === 'coordinates' ? (
@@ -2383,7 +2456,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
                 {/* Live Race Track */}
                 <div className="space-y-2.5 py-2">
                   {[
-                    { name: `${prefs.username} (You)`, score: racerScore, color: 'bg-emerald-600' },
+                    { name: `${effectiveUsername} (You)`, score: racerScore, color: 'bg-emerald-600' },
                     { name: 'Elena_Tactics', score: botScores[0], color: 'bg-sky-600' },
                     { name: 'Marcus_960', score: botScores[1], color: 'bg-amber-600' },
                     { name: 'Sora_Fast', score: botScores[2], color: 'bg-stone-500' },
@@ -2422,7 +2495,7 @@ export const PuzzlesView: React.FC<PuzzlesViewProps> = ({
 
             <DailyLeaderboard
               entries={leaderboard}
-              currentUsername={prefs.username}
+              currentUsername={effectiveUsername}
               isCurrentUserBot={isUserBot}
               dateKey={todayKey}
               onResetUserStats={resetUserLeaderboardStats}

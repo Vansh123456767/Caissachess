@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Award, Flame, RotateCcw } from 'lucide-react';
+import { Award, Flame, RotateCcw, User } from 'lucide-react';
 import { isBotAccount } from '../utils/botFilter';
 
 export interface DailyLeaderboardEntry {
@@ -15,54 +15,14 @@ export interface DailyLeaderboardEntry {
 
 export const LEADERBOARD_STORAGE_KEY = 'caissa_daily_leaderboard_v1';
 
-export function buildSeedLeaderboard(dateKey: string): DailyLeaderboardEntry[] {
-  return [
-    {
-      id: 'club-gm-aurelia',
-      name: 'GM_Aurelia',
-      solvedToday: 14,
-      totalSolved: 186,
-      currentStreak: 11,
-      bestStreak: 19,
-      lastUpdatedDate: dateKey,
-    },
-    {
-      id: 'club-marcus-960',
-      name: 'Marcus_960',
-      solvedToday: 9,
-      totalSolved: 124,
-      currentStreak: 7,
-      bestStreak: 14,
-      lastUpdatedDate: dateKey,
-    },
-    {
-      id: 'club-elena-tactics',
-      name: 'Elena_Tactics',
-      solvedToday: 6,
-      totalSolved: 98,
-      currentStreak: 5,
-      bestStreak: 12,
-      lastUpdatedDate: dateKey,
-    },
-    {
-      id: 'club-sora',
-      name: 'Sora_Correspondence',
-      solvedToday: 4,
-      totalSolved: 71,
-      currentStreak: 3,
-      bestStreak: 9,
-      lastUpdatedDate: dateKey,
-    },
-    {
-      id: 'club-aria',
-      name: 'Aria_Club',
-      solvedToday: 2,
-      totalSolved: 43,
-      currentStreak: 2,
-      bestStreak: 6,
-      lastUpdatedDate: dateKey,
-    },
-  ];
+export function buildSeedLeaderboard(_dateKey: string): DailyLeaderboardEntry[] {
+  return [];
+}
+
+function isHumanLeaderboardEntry(entry: DailyLeaderboardEntry): boolean {
+  if (!entry || isBotAccount(entry)) return false;
+  if (typeof entry.id === 'string' && entry.id.startsWith('club-')) return false;
+  return true;
 }
 
 export function loadLeaderboard(
@@ -76,9 +36,9 @@ export function loadLeaderboard(
     if (raw) {
       const parsed = JSON.parse(raw) as DailyLeaderboardEntry[];
       if (Array.isArray(parsed) && parsed.length > 0) {
-        // Reset daily counters for previous day and strictly exclude bot entries
+        // Reset daily counters for previous day and strictly exclude bot/seeded NPC entries
         const normalized = parsed
-          .filter((entry) => !isBotAccount(entry))
+          .filter(isHumanLeaderboardEntry)
           .map((entry) =>
             entry.lastUpdatedDate === dateKey
               ? entry
@@ -105,11 +65,8 @@ export function loadLeaderboard(
     // ignore storage parse failures
   }
 
-  const seeded = buildSeedLeaderboard(dateKey).filter((entry) => !isBotAccount(entry));
-  if (
-    !userBlockedAsBot &&
-    !seeded.some((e) => e.name.toLowerCase() === username.toLowerCase())
-  ) {
+  const seeded: DailyLeaderboardEntry[] = [];
+  if (!userBlockedAsBot) {
     seeded.push({
       id: `user-${username.toLowerCase()}`,
       name: username,
@@ -125,7 +82,7 @@ export function loadLeaderboard(
 
 export function saveLeaderboard(entries: DailyLeaderboardEntry[]): void {
   try {
-    const clean = entries.filter((e) => !isBotAccount(e));
+    const clean = entries.filter(isHumanLeaderboardEntry);
     localStorage.setItem(LEADERBOARD_STORAGE_KEY, JSON.stringify(clean));
   } catch {
     // ignore quota errors
@@ -153,7 +110,7 @@ export const DailyLeaderboard: React.FC<DailyLeaderboardProps> = ({
 
   const rankedAll = useMemo(() => {
     const normalized = entries
-      .filter((e) => !isBotAccount(e))
+      .filter(isHumanLeaderboardEntry)
       .map((e) => (e.lastUpdatedDate === dateKey ? e : { ...e, solvedToday: 0 }));
     return normalized.sort((a, b) => {
       if (sortBy === 'streak') {
@@ -225,40 +182,71 @@ export const DailyLeaderboard: React.FC<DailyLeaderboardProps> = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-stone-100 dark:divide-zinc-800/70">
-            {topFive.map((row, idx) => {
-              const isUser = row.name.toLowerCase() === currentUsername.toLowerCase();
-              return (
-                <tr
-                  key={row.id}
-                  className={
-                    isUser
-                      ? 'bg-emerald-50/70 dark:bg-emerald-950/25 font-semibold'
-                      : ''
-                  }
-                >
-                  <td className="py-2.5 pr-2 font-mono text-stone-500 dark:text-zinc-400">
-                    {idx + 1}
-                  </td>
-                  <td className="py-2.5 pr-3 text-stone-900 dark:text-zinc-100 truncate max-w-[150px]">
-                    {row.name}
-                    {isUser && (
-                      <span className="ml-1.5 text-[11px] font-normal text-emerald-700 dark:text-emerald-400">
-                        · You
+            {topFive.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="py-4 text-center text-xs text-stone-500 dark:text-zinc-400">
+                  No human players on the daily leaderboard yet.
+                </td>
+              </tr>
+            ) : (
+              topFive.map((row, idx) => {
+                const isUser = row.name.toLowerCase() === currentUsername.toLowerCase();
+                const isGuest = row.name.trim().toLowerCase() === 'anonymous';
+                return (
+                  <tr
+                    key={row.id}
+                    className={
+                      isUser
+                        ? 'bg-emerald-50/70 dark:bg-emerald-950/25 font-semibold'
+                        : ''
+                    }
+                  >
+                    <td className="py-2.5 pr-2 font-mono text-stone-500 dark:text-zinc-400">
+                      {idx + 1}
+                    </td>
+                    <td className="py-2.5 pr-3 text-stone-900 dark:text-zinc-100 max-w-[180px]">
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {isGuest && (
+                          <User
+                            className="w-3.5 h-3.5 text-stone-400 dark:text-zinc-500 shrink-0"
+                            aria-label="Unregistered guest player"
+                          />
+                        )}
+                        <span
+                          className={`truncate ${
+                            isGuest ? 'text-stone-700 dark:text-zinc-300 italic' : ''
+                          }`}
+                        >
+                          {row.name}
+                        </span>
+                        {isGuest && (
+                          <span
+                            className="px-1.5 py-0.5 rounded border border-stone-200 dark:border-zinc-700 bg-stone-100 dark:bg-zinc-800 text-stone-600 dark:text-zinc-300 text-[10px] font-medium shrink-0"
+                            title="Unregistered player without an account"
+                          >
+                            Guest
+                          </span>
+                        )}
+                        {isUser && (
+                          <span className="text-[11px] font-normal text-emerald-700 dark:text-emerald-400 shrink-0">
+                            · You
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="py-2.5 pr-3 text-right font-mono text-stone-800 dark:text-zinc-200">
+                      {row.solvedToday}
+                    </td>
+                    <td className="py-2.5 text-right font-mono text-stone-700 dark:text-zinc-300">
+                      <span className="inline-flex items-center justify-end gap-1">
+                        <Flame className="w-3 h-3 text-amber-500" />
+                        {row.currentStreak} ({row.bestStreak})
                       </span>
-                    )}
-                  </td>
-                  <td className="py-2.5 pr-3 text-right font-mono text-stone-800 dark:text-zinc-200">
-                    {row.solvedToday}
-                  </td>
-                  <td className="py-2.5 text-right font-mono text-stone-700 dark:text-zinc-300">
-                    <span className="inline-flex items-center justify-end gap-1">
-                      <Flame className="w-3 h-3 text-amber-500" />
-                      {row.currentStreak} ({row.bestStreak})
-                    </span>
-                  </td>
-                </tr>
-              );
-            })}
+                    </td>
+                  </tr>
+                );
+              })
+            )}
           </tbody>
         </table>
       </div>
@@ -266,8 +254,17 @@ export const DailyLeaderboard: React.FC<DailyLeaderboardProps> = ({
       {/* Show current user's standing below if outside Top 5 */}
       {userEntry && !userInTopFive && (
         <div className="pt-2 border-t border-stone-100 dark:border-zinc-800 flex items-center justify-between text-xs text-stone-600 dark:text-zinc-400">
-          <span>
-            Your rank: <strong className="font-mono text-stone-900 dark:text-zinc-100">#{userRankIdx + 1}</strong> · {userEntry.name}
+          <span className="inline-flex items-center gap-1.5">
+            Your rank: <strong className="font-mono text-stone-900 dark:text-zinc-100">#{userRankIdx + 1}</strong> ·{' '}
+            {userEntry.name.trim().toLowerCase() === 'anonymous' && (
+              <User className="w-3.5 h-3.5 text-stone-400 dark:text-zinc-500" aria-hidden="true" />
+            )}
+            <span>{userEntry.name}</span>
+            {userEntry.name.trim().toLowerCase() === 'anonymous' && (
+              <span className="px-1.5 py-0.5 rounded border border-stone-200 dark:border-zinc-700 bg-stone-100 dark:bg-zinc-800 text-stone-600 dark:text-zinc-300 text-[10px] font-medium">
+                Guest
+              </span>
+            )}
           </span>
           <span className="font-mono">
             {userEntry.solvedToday} solved · {userEntry.currentStreak} ({userEntry.bestStreak}) streak

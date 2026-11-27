@@ -6,7 +6,8 @@ export interface BotCheckCandidate {
 }
 
 const BOT_NAME_PATTERN =
-  /(^bot[_-]|[_-]bot$|\bbot\b|caissa\s*bot|\bstockfish\b|\bmaia\d*\b|\blc0\b|\bkomodo\b|\bai[_-]?player\b)/i;
+  /(?:^|[_\s-])bot(?:[_\s-]|\d|$)|caissa\s*(?:bot|engine)|\b(?:stockfish\d*|maia\d*|lc0|leela\w*|komodo\w*|alphazero|houdini|torch\d*|berserkbot)\b|\b(?:ai|chess)[_-]?(?:player|engine|bot)\b/i;
+const CAMEL_CASE_BOT_SUFFIX = /[a-z0-9]Bot(?:\d*$|[_\s-])/;
 
 export function isBotAccount(entry?: BotCheckCandidate | null): boolean {
   if (!entry) return false;
@@ -14,5 +15,5 @@ export function isBotAccount(entry?: BotCheckCandidate | null): boolean {
   if (entry.title && entry.title.trim().toUpperCase() === 'BOT') return true;
   const handle = (entry.name || entry.username || '').trim();
   if (!handle) return false;
-  return BOT_NAME_PATTERN.test(handle);
+  return BOT_NAME_PATTERN.test(handle) || CAMEL_CASE_BOT_SUFFIX.test(handle);
 }

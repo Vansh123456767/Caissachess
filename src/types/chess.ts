@@ -316,10 +316,20 @@ export interface DirectMessage {
 }
 
 export type ThemeMode = 'light' | 'dark';
-export type BoardThemeId = 'wood' | 'green' | 'blue' | 'walnut' | 'coral' | 'monochrome';
+export type BoardThemeId =
+  | 'wood'
+  | 'green'
+  | 'blue'
+  | 'walnut'
+  | 'coral'
+  | 'monochrome'
+  | 'emerald'
+  | 'midnight'
+  | 'rosewood'
+  | 'glass';
 export type PieceSetId = 'classic' | 'neo' | 'alpha' | 'minimal';
 export type BgThemeId = 'clean' | 'warm-linen' | 'obsidian-grid' | 'forest-slate';
-export type SoundThemeId = 'standard' | 'wood' | 'futuristic';
+export type SoundThemeId = 'standard' | 'wood' | 'futuristic' | 'retro' | 'shogi';
 export type MoveMethodId = 'both' | 'click' | 'drag';
 
 export type RatingCategory = 'bullet' | 'blitz' | 'rapid' | 'classical' | 'chess960';
@@ -331,6 +341,39 @@ export interface UserRatings {
   classical: number;
   chess960: number;
   history: { date: string; category: RatingCategory; rating: number }[];
+}
+
+export interface LiveGameSummary {
+  roomId: string;
+  variant: ChessVariant;
+  timeControl: string;
+  whiteName: string;
+  whiteIsGuest: boolean;
+  blackName: string;
+  blackIsGuest: boolean;
+  fen: string;
+  moveCount: number;
+  spectatorCount: number;
+  status: 'waiting' | 'active' | 'finished';
+}
+
+export interface ClubInfo {
+  id: string;
+  name: string;
+  description: string;
+  createdBy: string;
+  memberCount: number;
+  members: string[];
+  totalScore: number;
+}
+
+export interface HallOfFameEntry {
+  id: string;
+  tournamentId: string;
+  tournamentName: string;
+  format: 'arena' | 'swiss' | 'knockout';
+  completedAt: string;
+  podium: { rank: 1 | 2 | 3; name: string; isGuest?: boolean; score: number }[];
 }
 
 export type LanguageCode =
@@ -358,3 +401,4 @@ export interface UserPreferences {
   isBot?: boolean;
   username: string;
 }
+

@@ -25,6 +25,12 @@ interface AuthModalProps {
   onLogout: () => Promise<void> | void;
   planTier?: PlanTier;
   onOpenPlans?: () => void;
+  visitorId?: string;
+  guestStatsSummary?: {
+    gamesCount: number;
+    puzzlesSolved: number;
+    blitzRating: number;
+  };
 }
 
 function generateSuggestedPassword(): string {
@@ -88,6 +94,8 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   onLogout,
   planTier = 'free',
   onOpenPlans,
+  visitorId,
+  guestStatsSummary,
 }) => {
   const [mode, setMode] = useState<'login' | 'register'>(initialMode);
   const [username, setUsername] = useState('');
@@ -95,6 +103,7 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  const [claimGuestProgress, setClaimGuestProgress] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -167,10 +176,20 @@ export const AuthModal: React.FC<AuthModalProps> = ({
     setSubmitting(true);
     try {
       const endpoint = mode === 'register' ? '/api/auth/register' : '/api/auth/login';
+      const payload: Record<string, unknown> = {
+        username: trimmedUser,
+        password: rawPassInput,
+      };
+      if (mode === 'register' && claimGuestProgress) {
+        if (visitorId) payload.visitorId = visitorId;
+        if (guestStatsSummary) {
+          payload.claimRatings = { blitz: guestStatsSummary.blitzRating };
+        }
+      }
       const resp = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: trimmedUser, password: rawPassInput }),
+        body: JSON.stringify(payload),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok || !data?.token || !data?.user) {
@@ -307,6 +326,25 @@ export const AuthModal: React.FC<AuthModalProps> = ({
                 Create Account
               </button>
             </div>
+
+            {mode === 'register' && guestStatsSummary && (
+              <label className="flex items-start gap-2.5 p-3 rounded-lg border border-emerald-200 dark:border-emerald-800/70 bg-emerald-50/70 dark:bg-emerald-950/30 text-xs cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={claimGuestProgress}
+                  onChange={(e) => setClaimGuestProgress(e.target.checked)}
+                  className="accent-emerald-600 mt-0.5"
+                />
+                <div className="space-y-0.5">
+                  <div className="font-semibold text-emerald-900 dark:text-emerald-200">
+                    Claim my Anonymous guest ratings & progress
+                  </div>
+                  <div className="text-[11px] text-emerald-800/80 dark:text-emerald-300/80">
+                    Carry over {guestStatsSummary.blitzRating} Blitz Elo, {guestStatsSummary.gamesCount} local games & {guestStatsSummary.puzzlesSolved} puzzles solved.
+                  </div>
+                </div>
+              </label>
+            )}
 
             <form onSubmit={handleSubmit} noValidate className="space-y-3.5">
               <div>
